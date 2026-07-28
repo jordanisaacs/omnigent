@@ -269,6 +269,7 @@ def register_resources_routes(
     async def _fs_get_with_host_fallback(
         session_id: str,
         *,
+        environment_id: str,
         op: str,
         host_params: dict[str, Any],
         runner_path: str,
@@ -296,7 +297,8 @@ def register_resources_routes(
         :raises HTTPException: On host-reported filesystem failures.
         """
         try:
-            return await _proxy_get_to_runner(session_id, runner_path, params=runner_params)
+            payload = await _proxy_get_to_runner(session_id, runner_path, params=runner_params)
+            return _qualify_filesystem_payload(payload, environment_id, op)
         except OmnigentError as exc:
             # Only the runner-offline case is a candidate for the host
             # fallback; a real 404 / git error from a live runner must
@@ -305,15 +307,86 @@ def register_resources_routes(
                 raise
             runner_offline = exc
 
-        payload = await _read_workspace_via_host(session_id, op, host_params)
+        payload = await _read_workspace_via_host(
+            session_id,
+            environment_id,
+            op,
+            host_params,
+        )
         if payload is None:
             # No reachable host either — surface the original offline
             # error (503) so the client shows its reconnect affordance.
             raise runner_offline
+        return _qualify_filesystem_payload(payload, environment_id, op)
+
+    def _qualify_filesystem_payload(
+        payload: dict[str, Any],
+        environment_id: str,
+        op: str,
+    ) -> dict[str, Any]:
+        """Attach stable root identity to changed-file and diff responses."""
+        if op == "changes":
+            data = payload.get("data")
+            if isinstance(data, list):
+                return {
+                    **payload,
+                    "data": [
+                        {
+                            **entry,
+                            "environment_id": environment_id,
+                            "directory_id": environment_id,
+                        }
+                        if isinstance(entry, dict)
+                        else entry
+                        for entry in data
+                    ],
+                }
+        if op == "diff":
+            return {
+                **payload,
+                "environment_id": environment_id,
+                "directory_id": environment_id,
+            }
         return payload
+
+    def _host_directory_target(
+        session_id: str,
+        environment_id: str,
+    ) -> tuple[str, str, str] | None:
+        """Resolve inherited host placement and one attached directory root."""
+        conv = conversation_store.get_conversation(session_id)
+        if conv is None:
+            return None
+        directory = next(
+            (item for item in conv.directories if item.id == environment_id),
+            None,
+        )
+        if directory is not None:
+            root = directory.path
+            name = "Primary environment" if environment_id == "default" else directory.name
+        elif environment_id == "default" and conv.workspace:
+            root = conv.workspace
+            name = "Primary environment"
+        else:
+            return None
+
+        placement = conv
+        seen: set[str] = set()
+        while placement.host_id is None and placement.parent_conversation_id is not None:
+            if placement.id in seen:
+                return None
+            seen.add(placement.id)
+            parent = conversation_store.get_conversation(placement.parent_conversation_id)
+            if parent is None:
+                return None
+            placement = parent
+        if placement.host_id is None:
+            return None
+        return placement.host_id, root, name
 
     async def _read_workspace_via_host(
         session_id: str,
+        environment_id: str,
         op: str,
         host_params: dict[str, Any],
     ) -> dict[str, Any] | None:
@@ -335,10 +408,15 @@ def register_resources_routes(
 
         if host_registry is None:
             return None
-        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-        if conv is None or not conv.host_id or not conv.workspace:
+        target = await asyncio.to_thread(
+            _host_directory_target,
+            session_id,
+            environment_id,
+        )
+        if target is None:
             return None
-        host_conn = host_registry.get(conv.host_id)
+        host_id, workspace, _name = target
+        host_conn = host_registry.get(host_id)
         if host_conn is None:
             return None
         try:
@@ -346,7 +424,7 @@ def register_resources_routes(
                 host_registry=host_registry,
                 host_conn=host_conn,
                 op=op,
-                workspace=conv.workspace,
+                workspace=workspace,
                 session_id=session_id,
                 params=host_params,
             )
@@ -513,7 +591,37 @@ def register_resources_routes(
         """
         await _validate_session(session_id, request, LEVEL_READ)
         path = f"/v1/sessions/{session_id}/resources/environments"
-        return await _proxy_get_to_runner(session_id, path)
+        try:
+            return await _proxy_get_to_runner(session_id, path)
+        except OmnigentError as exc:
+            if exc.code != ErrorCode.RUNNER_UNAVAILABLE:
+                raise
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conv is None:
+                raise
+            ids = [directory.id for directory in conv.directories]
+            if not ids and conv.workspace:
+                ids = ["default"]
+            environments = [
+                environment
+                for environment_id in ids
+                if (
+                    environment := await _synthesize_offline_environment(
+                        session_id,
+                        environment_id,
+                    )
+                )
+                is not None
+            ]
+            if not environments:
+                raise
+            return {
+                "object": "list",
+                "data": environments,
+                "first_id": environments[0]["id"],
+                "last_id": environments[-1]["id"],
+                "has_more": False,
+            }
 
     @router.get(
         "/sessions/{session_id}/resources/environments/{environment_id}",
@@ -540,9 +648,8 @@ def register_resources_routes(
         except OmnigentError as exc:
             if exc.code != ErrorCode.RUNNER_UNAVAILABLE:
                 raise
-            # Runner offline but host-bound: synthesize the default
-            # environment so the file panel (which gates on this metadata)
-            # keeps browsing the host-served workspace at ``conv.workspace``.
+            # Runner offline but host-bound: synthesize the requested project
+            # environment so the file panel can browse it through the host.
             synthesized = await _synthesize_offline_environment(session_id, environment_id)
             if synthesized is None:
                 raise
@@ -552,31 +659,41 @@ def register_resources_routes(
         session_id: str,
         environment_id: str,
     ) -> dict[str, Any] | None:
-        """Build a default-environment resource from the bound workspace.
+        """Build an environment resource from an attached host directory.
 
         Used when the runner is offline but the session is host-bound, so
         the file panel's environment probe resolves and browsing can
         proceed against the host-served workspace.
 
         :param session_id: Session/conversation identifier.
-        :param environment_id: Requested environment id; only the default
-            environment is synthesized.
+        :param environment_id: Requested stable directory/environment id.
         :returns: A minimal environment resource dict with
             ``metadata.root`` set to the workspace path, or ``None`` when
             not applicable (non-default env, no host, no workspace).
         """
-        if environment_id != "default" or host_registry is None:
+        if host_registry is None:
             return None
-        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-        if conv is None or not conv.host_id or not conv.workspace:
+        target = await asyncio.to_thread(
+            _host_directory_target,
+            session_id,
+            environment_id,
+        )
+        if target is None:
             return None
-        if host_registry.get(conv.host_id) is None:
+        host_id, root, name = target
+        if host_registry.get(host_id) is None:
             return None
         return {
             "id": environment_id,
             "object": "session.resource",
             "type": "environment",
-            "metadata": {"root": conv.workspace},
+            "session_id": session_id,
+            "name": name,
+            "metadata": {
+                "root": root,
+                "directory_id": environment_id,
+                "filesystem": True,
+            },
         }
 
     @router.get(
@@ -1378,6 +1495,7 @@ def register_resources_routes(
         await _validate_session(session_id, request, LEVEL_READ)
         return await _fs_get_with_host_fallback(
             session_id,
+            environment_id=environment_id,
             op="list_or_read",
             host_params={
                 "path": "",
@@ -1435,6 +1553,7 @@ def register_resources_routes(
         await _validate_session(session_id, request, LEVEL_READ)
         return await _fs_get_with_host_fallback(
             session_id,
+            environment_id=environment_id,
             op="search",
             host_params={"q": q, "include": include, "exclude": exclude, "limit": limit},
             runner_path=path,
@@ -1465,6 +1584,7 @@ def register_resources_routes(
         await _validate_session(session_id, request, LEVEL_READ)
         return await _fs_get_with_host_fallback(
             session_id,
+            environment_id=environment_id,
             op="changes",
             host_params={},
             runner_path=path,
@@ -1502,6 +1622,7 @@ def register_resources_routes(
         await _validate_session(session_id, request, LEVEL_READ)
         return await _fs_get_with_host_fallback(
             session_id,
+            environment_id=environment_id,
             op="diff",
             host_params={"path": relative_path},
             runner_path=path,
@@ -1549,6 +1670,7 @@ def register_resources_routes(
         await _validate_session(session_id, request, LEVEL_READ)
         return await _fs_get_with_host_fallback(
             session_id,
+            environment_id=environment_id,
             op="list_or_read",
             host_params={
                 "path": relative_path,
