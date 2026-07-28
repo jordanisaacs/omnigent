@@ -8,8 +8,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from omnigent.entities import Conversation
 
-SESSION_INIT_PROTOCOL_VERSION = 2
+SESSION_INIT_PROTOCOL_VERSION = 3
 SESSION_INIT_PAYLOAD_KEY = "session_init"
+
+
+class RunnerSessionDirectory(BaseModel):
+    """One stable project directory in a runner initialization snapshot."""
+
+    id: str
+    path: str
 
 
 class RunnerSessionInitSnapshot(BaseModel):
@@ -20,6 +27,7 @@ class RunnerSessionInitSnapshot(BaseModel):
     created_at: int
     updated_at: int
     workspace: str | None = None
+    directories: list[RunnerSessionDirectory] = Field(default_factory=list)
     labels: dict[str, str] = Field(default_factory=dict)
     reasoning_effort: str | None = None
     model_override: str | None = None
@@ -62,6 +70,10 @@ def build_runner_session_init_payload(
             created_at=conversation.created_at,
             updated_at=conversation.updated_at,
             workspace=conversation.workspace,
+            directories=[
+                RunnerSessionDirectory(id=directory.id, path=directory.path)
+                for directory in conversation.directories
+            ],
             labels=conversation.labels,
             reasoning_effort=conversation.reasoning_effort,
             model_override=conversation.model_override,

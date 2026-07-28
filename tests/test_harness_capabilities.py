@@ -113,6 +113,7 @@ def test_optional_bench_capabilities_default_to_unknown() -> None:
     assert capability.live_queue is None
     assert capability.images is None
     assert capability.compaction is None
+    assert capability.additional_directories is False
     assert capability.as_dict() == {
         "integration_mode": "sdk-in-process",
         "elicitation": "none",
@@ -123,6 +124,7 @@ def test_optional_bench_capabilities_default_to_unknown() -> None:
         "subagents": False,
         "interrupt": True,
         "streaming": True,
+        "additional_directories": False,
         "steering": None,
         "live_queue": None,
         "images": None,

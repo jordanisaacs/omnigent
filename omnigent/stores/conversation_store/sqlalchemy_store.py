@@ -72,6 +72,13 @@ from omnigent.entities import (
     PagedList,
     parse_item_data,
 )
+from omnigent.session_directories import (
+    SessionDirectory,
+    decode_session_directories,
+    encode_session_directories,
+    replace_default_directory,
+    validate_workspace_directory_consistency,
+)
 from omnigent.session_import.models import (
     IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
     IMPORT_SOURCE_LABEL_KEY,
@@ -204,6 +211,10 @@ def _to_conversation(
             else None
         ),
         workspace=meta.workspace if meta else None,
+        directories=decode_session_directories(
+            meta.directories if meta else None,
+            workspace=meta.workspace if meta else None,
+        ),
         git_branch=meta.git_branch if meta else None,
         archived=row.archived,
         live_status=(
@@ -272,6 +283,7 @@ def _new_session_metadata_row(
     parent_conversation_id: str | None = None,
     runner_id: str | None = None,
     workspace: str | None = None,
+    directories: tuple[SessionDirectory, ...] = (),
     terminal_launch_args: list[str] | None = None,
 ) -> SqlConversationMetadata:
     """
@@ -283,16 +295,23 @@ def _new_session_metadata_row(
     :param runner_id: Optional runner binding inherited from the
         parent session. ``None`` leaves the column NULL.
     :param workspace: Optional starting cwd. ``None`` leaves it NULL.
+    :param directories: Stable project roots visible to the session.
+        Empty preserves the legacy single-workspace representation.
     :param terminal_launch_args: Optional pass-through CLI args for a
         native terminal wrapper. ``None`` leaves it NULL; a list
         (including ``[]``) is JSON-encoded.
     :returns: Unsaved :class:`SqlConversationMetadata` row.
     """
+    validated_directories = validate_workspace_directory_consistency(
+        directories,
+        workspace,
+    )
     return SqlConversationMetadata(
         id=conversation_id,
         kind=encode_conversation_kind("sub_agent" if parent_conversation_id else "default"),
         runner_id=runner_id,
         workspace=workspace,
+        directories=encode_session_directories(validated_directories),
         terminal_launch_args=(
             json.dumps(terminal_launch_args) if terminal_launch_args is not None else None
         ),
@@ -823,6 +842,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         sub_agent_name: str | None = None,
         host_id: str | None = None,
         workspace: str | None = None,
+        directories: tuple[SessionDirectory, ...] = (),
         git_branch: str | None = None,
         terminal_launch_args: list[str] | None = None,
         conversation_id: str | None = None,
@@ -862,6 +882,8 @@ class SqlAlchemyConversationStore(ConversationStore):
             already-canonicalized realpath from
             ``host.stat`` — this method does no expansion. When a git
             worktree was created, this is the worktree directory path.
+        :param directories: Stable project roots visible to the session.
+            Empty preserves the legacy single-workspace representation.
         :param git_branch: Git branch checked out in the session's
             worktree, e.g. ``"feature/login"``. Set only when the
             session was created with a server-created worktree;
@@ -892,6 +914,10 @@ class SqlAlchemyConversationStore(ConversationStore):
 
         now = now_epoch()
         new_id = conversation_id if conversation_id is not None else generate_conversation_id()
+        validated_directories = validate_workspace_directory_consistency(
+            directories,
+            workspace,
+        )
         try:
             # Get parent's root from AP, then write AP row and Omnigent meta separately.
             root_id = new_id
@@ -949,6 +975,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 host_id=host_id,
                 sub_agent_name=sub_agent_name,
                 workspace=workspace,
+                directories=encode_session_directories(validated_directories),
                 git_branch=git_branch,
                 terminal_launch_args=(
                     json.dumps(terminal_launch_args) if terminal_launch_args is not None else None
@@ -2902,7 +2929,8 @@ class SqlAlchemyConversationStore(ConversationStore):
 
     def clear_host_binding(self, conversation_id: str) -> Conversation:
         """
-        NULL ``host_id``/``workspace``/``git_branch``/``runner_id`` together.
+        NULL ``host_id``/``workspace``/``directories``/``git_branch``/
+        ``runner_id`` together.
 
         Single-transaction full unbind — see
         :meth:`ConversationStore.clear_host_binding`. ``host_id`` and
@@ -2923,6 +2951,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 )
             meta.host_id = None
             meta.workspace = None
+            meta.directories = None
             meta.git_branch = None
             meta.runner_id = None
         with self._conv_session() as ap_sess:
@@ -3032,7 +3061,14 @@ class SqlAlchemyConversationStore(ConversationStore):
                 )
             meta.host_id = host_id
             if workspace is not None:
+                current_directories = decode_session_directories(
+                    meta.directories,
+                    workspace=meta.workspace,
+                )
                 meta.workspace = workspace
+                meta.directories = encode_session_directories(
+                    replace_default_directory(current_directories, workspace)
+                )
             if git_branch is not None:
                 meta.git_branch = git_branch
         with self._conv_session() as ap_sess:
@@ -3106,6 +3142,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         labels: dict[str, str] | None = None,
         reasoning_effort: str | None = None,
         workspace: str | None = None,
+        directories: tuple[SessionDirectory, ...] = (),
         terminal_launch_args: list[str] | None = None,
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
@@ -3172,6 +3209,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             labels=labels,
             reasoning_effort=reasoning_effort,
             workspace=workspace,
+            directories=directories,
             terminal_launch_args=terminal_launch_args,
             parent_conversation_id=parent_conversation_id,
             runner_id=runner_id,
@@ -3189,6 +3227,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         labels: dict[str, str] | None = None,
         reasoning_effort: str | None = None,
         workspace: str | None = None,
+        directories: tuple[SessionDirectory, ...] = (),
         terminal_launch_args: list[str] | None = None,
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
@@ -3240,6 +3279,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             parent_conversation_id=parent_conversation_id,
             runner_id=runner_id,
             workspace=workspace,
+            directories=directories,
             terminal_launch_args=terminal_launch_args,
         )
         with self._session() as session:
