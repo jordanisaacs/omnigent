@@ -36,6 +36,7 @@ def test_encode_decode_round_trip_and_legacy_workspace_fallback() -> None:
     assert decode_session_directories(None, workspace="/repo/legacy") == (
         SessionDirectory(DEFAULT_DIRECTORY_ID, "/repo/legacy"),
     )
+    assert decode_session_directories(None, workspace="   ") == ()
 
 
 def test_child_scope_inherits_all_or_an_explicit_subset_in_parent_order() -> None:

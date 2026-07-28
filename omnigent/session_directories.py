@@ -60,7 +60,7 @@ def build_session_directories(
 ) -> tuple[SessionDirectory, ...]:
     """Build a new session directory set from canonical paths."""
     directories: list[SessionDirectory] = []
-    if workspace is not None:
+    if workspace is not None and workspace.strip():
         directories.append(SessionDirectory(DEFAULT_DIRECTORY_ID, workspace))
     directories.extend(
         SessionDirectory(generate_directory_id(), path) for path in additional_paths
