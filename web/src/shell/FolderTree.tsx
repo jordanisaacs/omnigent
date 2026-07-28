@@ -196,6 +196,7 @@ export function FolderTree({
   isSearching = false,
   isSearchError = false,
   searchError = null,
+  environmentId = "default",
 }: {
   files: WorkspaceFile[] | undefined;
   isLoading: boolean;
@@ -225,18 +226,21 @@ export function FolderTree({
   isSearchError?: boolean;
   /** Error from a failed search request. */
   searchError?: Error | null;
+  /** Stable attached-directory id used for lazy reads and downloads. */
+  environmentId?: string;
 }) {
   // Initialise from the module-level cache so expanded state survives
   // unmount/remount (e.g. opening the FileViewer and navigating back).
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
     if (!conversationId) return new Set();
-    const cached = expandedPathsCache.get(conversationId);
+    const cacheKey = conversationId ? `${conversationId}:${environmentId}` : null;
+    const cached = cacheKey ? expandedPathsCache.get(cacheKey) : undefined;
     if (cached) return new Set(cached);
     // If files are already available (React Query cache hit), seed defaults now
     // to avoid a flash of all-collapsed state.
     if (files) {
       const initial = defaultExpandedPaths(files);
-      expandedPathsCache.set(conversationId, initial);
+      if (cacheKey) expandedPathsCache.set(cacheKey, initial);
       return new Set(initial);
     }
     return new Set();
@@ -247,21 +251,22 @@ export function FolderTree({
   // the cache when the panel switches conversations without remounting —
   // otherwise the tree keeps the previous conversation's expanded set. A
   // layout effect so the switch resolves before paint (no collapsed flash).
-  const expandedForRef = useRef(conversationId);
+  const expandedForRef = useRef(conversationId ? `${conversationId}:${environmentId}` : undefined);
   useLayoutEffect(() => {
     if (!conversationId) return;
-    const switched = expandedForRef.current !== conversationId;
-    expandedForRef.current = conversationId;
-    const cached = expandedPathsCache.get(conversationId);
+    const cacheKey = `${conversationId}:${environmentId}`;
+    const switched = expandedForRef.current !== cacheKey;
+    expandedForRef.current = cacheKey;
+    const cached = expandedPathsCache.get(cacheKey);
     if (cached) {
       if (switched) setExpandedPaths(new Set(cached));
       return;
     }
     if (!files) return;
     const initial = defaultExpandedPaths(files);
-    expandedPathsCache.set(conversationId, initial);
+    expandedPathsCache.set(cacheKey, initial);
     setExpandedPaths(new Set(initial));
-  }, [conversationId, files]);
+  }, [conversationId, environmentId, files]);
 
   // Map from file path → change status, for file-level badges in the tree.
   const changedFileMap = useMemo<Map<string, WorkspaceChangedFile["status"]>>(() => {
@@ -294,11 +299,11 @@ export function FolderTree({
         const next = new Set(prev);
         if (next.has(path)) next.delete(path);
         else next.add(path);
-        if (conversationId) expandedPathsCache.set(conversationId, next);
+        if (conversationId) expandedPathsCache.set(`${conversationId}:${environmentId}`, next);
         return next;
       });
     },
-    [conversationId],
+    [conversationId, environmentId],
   );
 
   // When a search query is active, render a flat filtered list instead of the tree.
@@ -350,6 +355,7 @@ export function FolderTree({
               onFileSelect={onFileSelect}
               conversationId={conversationId}
               changedFileMap={changedFileMap}
+              environmentId={environmentId}
             />
           ))}
         </ul>
@@ -403,6 +409,7 @@ export function FolderTree({
             changedFileMap={changedFileMap}
             dirtyDirMap={dirtyDirMap}
             sort={sort}
+            environmentId={environmentId}
           />
         ))}
       </ul>
@@ -432,6 +439,7 @@ function FileRowItem({
   bytes,
   onFileSelect,
   conversationId,
+  environmentId,
 }: {
   /** Canonical workspace-relative path, used for the download button and title. */
   path: string;
@@ -447,6 +455,7 @@ function FileRowItem({
   bytes: number | null;
   onFileSelect: (path: string) => void;
   conversationId: string | undefined;
+  environmentId: string;
 }) {
   const isDeleted = fileStatus === "deleted";
   const fileColorClass =
@@ -509,13 +518,23 @@ function FileRowItem({
             </span>
             {conversationId && (
               <span className="absolute inset-0 flex items-center justify-center">
-                <FileDownloadButton conversationId={conversationId} path={path} />
+                <FileDownloadButton
+                  conversationId={conversationId}
+                  path={path}
+                  environmentId={environmentId}
+                />
               </span>
             )}
           </div>
         ) : (
           !isDeleted &&
-          conversationId && <FileDownloadButton conversationId={conversationId} path={path} />
+          conversationId && (
+            <FileDownloadButton
+              conversationId={conversationId}
+              path={path}
+              environmentId={environmentId}
+            />
+          )
         )}
       </div>
       {tooltip}
@@ -532,11 +551,13 @@ function SearchResultRow({
   onFileSelect,
   conversationId,
   changedFileMap,
+  environmentId,
 }: {
   file: WorkspaceFile;
   onFileSelect: (path: string) => void;
   conversationId: string | undefined;
   changedFileMap: Map<string, WorkspaceChangedFile["status"]>;
+  environmentId: string;
 }) {
   return (
     <FileRowItem
@@ -547,6 +568,7 @@ function SearchResultRow({
       bytes={file.bytes}
       onFileSelect={onFileSelect}
       conversationId={conversationId}
+      environmentId={environmentId}
     />
   );
 }
@@ -561,12 +583,14 @@ function TreeFileRow({
   onFileSelect,
   conversationId,
   fileStatus,
+  environmentId,
 }: {
   node: FileNode;
   depth: number;
   onFileSelect: (path: string) => void;
   conversationId: string | undefined;
   fileStatus: WorkspaceChangedFile["status"] | undefined;
+  environmentId: string;
 }) {
   return (
     <FileRowItem
@@ -577,6 +601,7 @@ function TreeFileRow({
       bytes={node.file.bytes}
       onFileSelect={onFileSelect}
       conversationId={conversationId}
+      environmentId={environmentId}
     />
   );
 }
@@ -596,6 +621,7 @@ function TreeNodeRow({
   changedFileMap,
   dirtyDirMap,
   sort,
+  environmentId,
 }: {
   node: TreeNode;
   depth: number;
@@ -607,6 +633,7 @@ function TreeNodeRow({
   changedFileMap: Map<string, WorkspaceChangedFile["status"]>;
   dirtyDirMap: Map<string, WorkspaceChangedFile["status"]>;
   sort: ChangedSort;
+  environmentId: string;
 }) {
   const open = node.type === "dir" && expandedPaths.has(node.path);
   const isLazyDir = node.type === "dir" && node.lazy === true;
@@ -615,6 +642,7 @@ function TreeNodeRow({
   const { data: lazyData, isLoading: lazyLoading } = useWorkspaceDirectory(
     conversationId,
     isLazyDir && open ? node.path : null,
+    environmentId,
   );
 
   if (node.type === "file") {
@@ -625,6 +653,7 @@ function TreeNodeRow({
         onFileSelect={onFileSelect}
         conversationId={conversationId}
         fileStatus={changedFileMap.get(node.file.path)}
+        environmentId={environmentId}
       />
     );
   }
@@ -728,6 +757,7 @@ function TreeNodeRow({
               changedFileMap={changedFileMap}
               dirtyDirMap={dirtyDirMap}
               sort={sort}
+              environmentId={environmentId}
             />
           ))}
         </ul>

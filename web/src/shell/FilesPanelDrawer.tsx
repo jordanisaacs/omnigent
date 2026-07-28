@@ -27,7 +27,7 @@ interface FilesPanelDrawerProps {
    * routes to the FileViewer in AppShell; AppShell is responsible
    * for closing this drawer in response.
    */
-  onFileSelect: (path: string) => void;
+  onFileSelect: (path: string, environmentId?: string) => void;
   /**
    * Lifted Changed/Explore tab state. Lifted to AppShell so the
    * choice survives drawer open/close cycles.

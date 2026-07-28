@@ -1598,6 +1598,7 @@ type LandingDraft = {
   sandboxRepoUrl: string;
   sandboxRepoBranch: string;
   workspace: string;
+  additionalDirectories: string[];
   branchName: string;
   prefilledBranch: string;
   permissionMode: string;
@@ -1797,6 +1798,11 @@ export function NewChatLandingScreen() {
     () => landingDraft?.sandboxRepoBranch ?? "",
   );
   const [workspace, setWorkspace] = useState<string>(() => landingDraft?.workspace ?? "");
+  const [additionalDirectories, setAdditionalDirectories] = useState<string[]>(
+    () => landingDraft?.additionalDirectories ?? [],
+  );
+  const [additionalDirectoryCandidate, setAdditionalDirectoryCandidate] = useState("");
+  const [additionalDirectoryPopoverOpen, setAdditionalDirectoryPopoverOpen] = useState(false);
   const [branchName, setBranchName] = useState<string>(() => landingDraft?.branchName ?? "");
   // The base branch auto-fills from the configured default (Settings › Git)
   // when the user names a worktree branch, and is left alone once the user
@@ -1917,6 +1923,7 @@ export function NewChatLandingScreen() {
     sandboxRepoUrl,
     sandboxRepoBranch,
     workspace,
+    additionalDirectories,
     branchName,
     prefilledBranch,
     permissionMode,
@@ -2034,6 +2041,7 @@ export function NewChatLandingScreen() {
     setSelectedHostId(null);
     setPickedAgentId(projectParam !== "" ? null : readLastAgentId());
     setWorkspace("");
+    setAdditionalDirectories([]);
     setBranchName("");
     seededHostRef.current = null;
     worktreeSeededForRef.current = null;
@@ -2754,6 +2762,7 @@ export function NewChatLandingScreen() {
     // Workspace is host-specific — clear it and let the seeding effect run for
     // the new host.
     setWorkspace("");
+    setAdditionalDirectories([]);
     seededHostRef.current = null;
   }
 
@@ -2768,6 +2777,7 @@ export function NewChatLandingScreen() {
     setSandboxSelected(true);
     setSelectedHostId(null);
     setWorkspace("");
+    setAdditionalDirectories([]);
     seededHostRef.current = null;
   }
 
@@ -2799,6 +2809,10 @@ export function NewChatLandingScreen() {
     setCreateError(null);
     try {
       const trimmedBranch = branchName.trim();
+      const primaryDirectory = normalizeWorkspacePath(workspaceTrimmed);
+      const attachedDirectories = additionalDirectories.filter(
+        (path) => normalizeWorkspacePath(path) !== primaryDirectory,
+      );
       // `shouldCreateWorktree` (component scope): true only when a branch is
       // named and the workspace isn't already an existing worktree. Starting
       // in an existing worktree sends no git opts — the workspace is bound
@@ -2821,6 +2835,9 @@ export function NewChatLandingScreen() {
         const bundle = await buildAgentBundle(pendingAgent);
         const metadata: Record<string, unknown> = {};
         if (workspaceTrimmed) metadata.workspace = workspaceTrimmed;
+        if (attachedDirectories.length > 0) {
+          metadata.directories = attachedDirectories.map((path) => ({ path }));
+        }
         data = await createBundledSession(
           bundle,
           metadata as Parameters<typeof createBundledSession>[1],
@@ -2855,6 +2872,10 @@ export function NewChatLandingScreen() {
               : {
                   host_id: selectedHostId,
                   workspace: workspaceTrimmed,
+                  directories:
+                    attachedDirectories.length > 0
+                      ? attachedDirectories.map((path) => ({ path }))
+                      : undefined,
                   // Create a new worktree, or bind an existing one
                   // (`existing_worktree` records the branch for the sidebar +
                   // delete flow without creating anything), or neither.
@@ -2999,6 +3020,22 @@ export function NewChatLandingScreen() {
       <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
     </button>
   );
+
+  const normalizedAdditionalCandidate = normalizeWorkspacePath(additionalDirectoryCandidate);
+  const normalizedWorkspace = normalizeWorkspacePath(workspaceTrimmed);
+  const canAddDirectory =
+    normalizedAdditionalCandidate !== null &&
+    isValidWorkspace(normalizedAdditionalCandidate) &&
+    normalizedAdditionalCandidate !== normalizedWorkspace &&
+    !additionalDirectories.includes(normalizedAdditionalCandidate) &&
+    additionalDirectories.length < 15;
+
+  function addAdditionalDirectory(): void {
+    if (!canAddDirectory || normalizedAdditionalCandidate === null) return;
+    setAdditionalDirectories((current) => [...current, normalizedAdditionalCandidate]);
+    setAdditionalDirectoryCandidate("");
+    setAdditionalDirectoryPopoverOpen(false);
+  }
 
   return (
     // pb-12 lifts the content slightly above the geometric center, where
@@ -3702,6 +3739,88 @@ export function NewChatLandingScreen() {
                             : undefined
                         }
                       />
+                    ) : (
+                      <p className="p-3 text-xs text-muted-foreground">Select a host first.</p>
+                    )}
+                  </PopoverContent>
+                </Popover>
+              )}
+
+              {!sandboxSelected &&
+                additionalDirectories.map((path) => (
+                  <span
+                    key={path}
+                    className="flex h-6 max-w-44 items-center gap-1 rounded-full bg-muted px-2.5 text-13 text-foreground"
+                    title={path}
+                    data-testid="new-chat-landing-additional-directory"
+                  >
+                    <FolderIcon className="size-3.5 shrink-0" />
+                    <span className="hidden truncate sm:block">
+                      {path.split("/").filter(Boolean).pop() ?? path}
+                    </span>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                      aria-label={`Remove attached folder ${path}`}
+                      onClick={() =>
+                        setAdditionalDirectories((current) =>
+                          current.filter((directory) => directory !== path),
+                        )
+                      }
+                    >
+                      <XIcon className="size-3" />
+                    </button>
+                  </span>
+                ))}
+
+              {/* Additional roots are attached directly to the session. A
+                  worktree, when requested, still applies only to the primary
+                  working directory. Managed sandboxes intentionally hide this
+                  control because their filesystem is server-provisioned. */}
+              {!sandboxSelected && additionalDirectories.length < 15 && (
+                <Popover
+                  open={additionalDirectoryPopoverOpen}
+                  onOpenChange={setAdditionalDirectoryPopoverOpen}
+                >
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex h-6 items-center gap-1 rounded-full px-2.5 text-13 font-normal text-muted-foreground transition-colors hover:text-foreground"
+                      data-testid="new-chat-landing-add-directory-chip"
+                    >
+                      <PlusIcon className="size-3.5 shrink-0" />
+                      <span className="hidden sm:block">Add folder</span>
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-[min(420px,calc(100vw-2rem))] p-0">
+                    {selectedHostId ? (
+                      <div className="flex flex-col">
+                        <WorkspacePicker
+                          hostId={selectedHostId}
+                          initialPath={
+                            isNavigablePath(additionalDirectoryCandidate)
+                              ? additionalDirectoryCandidate
+                              : isNavigablePath(workspaceTrimmed)
+                                ? workspaceTrimmed
+                                : undefined
+                          }
+                          onNavigate={setAdditionalDirectoryCandidate}
+                        />
+                        <div className="flex items-center justify-between gap-2 border-t border-border p-2">
+                          <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
+                            {normalizedAdditionalCandidate ?? "Choose a folder"}
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={!canAddDirectory}
+                            onClick={addAdditionalDirectory}
+                            data-testid="new-chat-landing-add-directory-confirm"
+                          >
+                            Add
+                          </Button>
+                        </div>
+                      </div>
                     ) : (
                       <p className="p-3 text-xs text-muted-foreground">Select a host first.</p>
                     )}

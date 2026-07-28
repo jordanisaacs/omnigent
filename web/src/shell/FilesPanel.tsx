@@ -17,12 +17,14 @@ import { useParams } from "@/lib/routing";
 import { useSessionHostOnline, useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { useChatStore } from "@/store/chatStore";
 import {
-  useWorkspaceChangedFiles,
-  useWorkspaceAllFiles,
-  useWorkspaceEnvironment,
+  useAllWorkspaceChangedFiles,
+  useWorkspaceAllFilesForEnvironment,
+  type WorkspaceChangedFile,
+  type WorkspaceEnvironment,
   useWorkspaceFileSearch,
 } from "@/hooks/useWorkspaceChangedFiles";
 import { cn } from "@/lib/utils";
+import { DEFAULT_WORKSPACE_ENVIRONMENT_ID } from "@/lib/workspaceFiles";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
@@ -36,7 +38,7 @@ import { FolderTree } from "./FolderTree";
 import { useScrollRestore } from "./useScrollRestore";
 
 interface FilesPanelProps {
-  onFileSelect: (path: string) => void;
+  onFileSelect: (path: string, environmentId?: string) => void;
   flatView: boolean;
   onFlatViewChange: (flatView: boolean) => void;
   /**
@@ -310,16 +312,10 @@ export function FilesPanel({
   // rounded card chrome; only the standalone card caps content at max-h.
   const isDrawer = onClose !== undefined;
   const fillHeight = isDrawer || frameless === true;
-  const changedQuery = useWorkspaceChangedFiles(conversationId, {
+  const changedQuery = useAllWorkspaceChangedFiles(conversationId, {
     enabled: true,
   });
-  const allFilesQuery = useWorkspaceAllFiles(conversationId, {
-    enabled: !flatView,
-  });
-  const envQuery = useWorkspaceEnvironment(conversationId, {
-    enabled: true,
-  });
-  const workingDir = envQuery.data?.root ?? null;
+  const environments = changedQuery.environments;
   const changedFiles = changedQuery.data?.data ?? [];
   const changedCount = changedFiles.length;
   const hiddenFilesCount = changedFiles.filter((f) =>
@@ -347,17 +343,6 @@ export function FilesPanel({
     return () => clearTimeout(timer);
   }, [treeSearch, treeInclude, treeExclude]);
 
-  // Only fire search queries on the Explore tab. The include/exclude globs
-  // narrow an active text query; globs alone do not search.
-  const treeSearchQuery = useWorkspaceFileSearch(
-    conversationId,
-    debouncedTreeSearch,
-    debouncedTreeInclude,
-    debouncedTreeExclude,
-    {
-      enabled: !flatView && debouncedTreeSearch.trim().length > 0,
-    },
-  );
   // Highlight the filters toggle when include/exclude carry a value.
   const treeFiltersActive = treeInclude.trim().length > 0 || treeExclude.trim().length > 0;
 
@@ -380,10 +365,14 @@ export function FilesPanel({
         fillHeight ? "flex h-full min-h-0 flex-col" : "flex min-h-0 flex-col",
       )}
     >
-      {/* Header — single row: [title · workingDir] [eye] [close?] */}
+      {/* Header — single row: [title · root count] [eye] [close?] */}
       <div className="flex shrink-0 items-center gap-2 px-3 py-2">
-        <span className="shrink-0 font-medium text-sm">Working folder</span>
-        {workingDir && <WorkingDirLabel dir={workingDir} />}
+        <span className="shrink-0 font-medium text-sm">Project folders</span>
+        {environments.length > 0 && (
+          <span className="text-[11px] text-muted-foreground">
+            {environments.length} root{environments.length === 1 ? "" : "s"}
+          </span>
+        )}
         {servedFromHost && (
           <TooltipProvider>
             <Tooltip>
@@ -514,40 +503,125 @@ export function FilesPanel({
         onScroll={handleScroll}
       >
         {flatView ? (
-          <FlatFileList
-            files={changedQuery.data?.data}
-            isLoading={changedQuery.isLoading}
-            isError={changedQuery.isError}
-            error={changedQuery.error}
-            onFileSelect={onFileSelect}
-            showHidden={showHidden}
-            onShowHidden={() => onShowHiddenChange(true)}
-            searchQuery={changedSearch}
-            sort={changedSort}
-            conversationId={conversationId}
-            runnerWentOffline={runnerWentOffline}
-          />
+          <div className="flex flex-col gap-3">
+            {(environments.length > 0 ? environments : [undefined]).map((environment) => {
+              const files = environment
+                ? changedQuery.data?.data.filter(
+                    (file) =>
+                      (file.environment_id ?? DEFAULT_WORKSPACE_ENVIRONMENT_ID) === environment.id,
+                  )
+                : changedQuery.data?.data;
+              return (
+                <div key={environment?.id ?? "loading"}>
+                  {environment && <DirectoryGroupHeader environment={environment} />}
+                  <FlatFileList
+                    files={files}
+                    isLoading={changedQuery.isLoading}
+                    isError={changedQuery.isError}
+                    error={changedQuery.error}
+                    onFileSelect={onFileSelect}
+                    showHidden={showHidden}
+                    onShowHidden={() => onShowHiddenChange(true)}
+                    searchQuery={changedSearch}
+                    sort={changedSort}
+                    conversationId={conversationId}
+                    runnerWentOffline={runnerWentOffline}
+                  />
+                </div>
+              );
+            })}
+          </div>
         ) : (
-          <FolderTree
-            files={allFilesQuery.data?.data}
-            isLoading={allFilesQuery.isLoading}
-            isError={allFilesQuery.isError}
-            error={allFilesQuery.error}
-            onFileSelect={onFileSelect}
-            conversationId={conversationId}
-            showHidden={showHidden}
-            onShowHidden={() => onShowHiddenChange(true)}
-            changedFiles={changedQuery.data?.data}
-            sort={changedSort}
-            runnerWentOffline={runnerWentOffline}
-            searchQuery={debouncedTreeSearch}
-            searchResults={treeSearchQuery.data}
-            isSearching={treeSearchQuery.isFetching}
-            isSearchError={treeSearchQuery.isError}
-            searchError={treeSearchQuery.error instanceof Error ? treeSearchQuery.error : null}
-          />
+          <div className="flex flex-col gap-3">
+            {environments.map((environment) => (
+              <RootFolderTree
+                key={environment.id}
+                conversationId={conversationId}
+                environment={environment}
+                changedFiles={changedFiles.filter(
+                  (file) =>
+                    (file.environment_id ?? DEFAULT_WORKSPACE_ENVIRONMENT_ID) === environment.id,
+                )}
+                onFileSelect={onFileSelect}
+                showHidden={showHidden}
+                onShowHidden={() => onShowHiddenChange(true)}
+                sort={changedSort}
+                runnerWentOffline={runnerWentOffline}
+                searchQuery={debouncedTreeSearch}
+                include={debouncedTreeInclude}
+                exclude={debouncedTreeExclude}
+              />
+            ))}
+          </div>
         )}
       </section>
+    </div>
+  );
+}
+
+function DirectoryGroupHeader({ environment }: { environment: WorkspaceEnvironment }) {
+  return (
+    <div className="mb-1 flex min-w-0 items-center gap-2 border-b border-border px-2 pb-1">
+      <span className="truncate font-medium text-xs">{environment.name}</span>
+      {environment.root && <WorkingDirLabel dir={environment.root} />}
+    </div>
+  );
+}
+
+function RootFolderTree({
+  conversationId,
+  environment,
+  changedFiles,
+  onFileSelect,
+  showHidden,
+  onShowHidden,
+  sort,
+  runnerWentOffline,
+  searchQuery,
+  include,
+  exclude,
+}: {
+  conversationId: string | undefined;
+  environment: WorkspaceEnvironment;
+  changedFiles: WorkspaceChangedFile[];
+  onFileSelect: (path: string, environmentId?: string) => void;
+  showHidden: boolean;
+  onShowHidden: () => void;
+  sort: ChangedSort;
+  runnerWentOffline: boolean;
+  searchQuery: string;
+  include: string;
+  exclude: string;
+}) {
+  const filesQuery = useWorkspaceAllFilesForEnvironment(conversationId, environment.id);
+  const searchQueryResult = useWorkspaceFileSearch(conversationId, searchQuery, include, exclude, {
+    enabled: searchQuery.trim().length > 0,
+    ...(environment.id === DEFAULT_WORKSPACE_ENVIRONMENT_ID
+      ? {}
+      : { environmentId: environment.id }),
+  });
+  return (
+    <div>
+      <DirectoryGroupHeader environment={environment} />
+      <FolderTree
+        files={filesQuery.data?.data}
+        isLoading={filesQuery.isLoading}
+        isError={filesQuery.isError}
+        error={filesQuery.error}
+        onFileSelect={(path) => onFileSelect(path, environment.id)}
+        conversationId={conversationId}
+        showHidden={showHidden}
+        onShowHidden={onShowHidden}
+        changedFiles={changedFiles}
+        sort={sort}
+        runnerWentOffline={runnerWentOffline}
+        searchQuery={searchQuery}
+        searchResults={searchQueryResult.data}
+        isSearching={searchQueryResult.isFetching}
+        isSearchError={searchQueryResult.isError}
+        searchError={searchQueryResult.error instanceof Error ? searchQueryResult.error : null}
+        environmentId={environment.id}
+      />
     </div>
   );
 }

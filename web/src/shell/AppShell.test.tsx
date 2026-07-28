@@ -29,7 +29,11 @@ vi.mock("@/hooks/useTerminals", async (importOriginal) => ({
 
 vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
   useWorkspaceEnvironment: vi.fn(() => ({ data: undefined, isLoading: true })),
-  useWorkspaceChangedFiles: vi.fn(() => ({ data: undefined, isLoading: true })),
+  useAllWorkspaceChangedFiles: vi.fn(() => ({
+    data: undefined,
+    environments: [],
+    isLoading: true,
+  })),
 }));
 
 vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
@@ -70,7 +74,7 @@ vi.mock("./FilesPanel", () => ({
     flatView,
     onFlatViewChange,
   }: {
-    onFileSelect: (path: string) => void;
+    onFileSelect: (path: string, environmentId?: string) => void;
     flatView: boolean;
     onFlatViewChange: (v: boolean) => void;
   }) => (
@@ -81,6 +85,13 @@ vi.mock("./FilesPanel", () => ({
         onClick={() => onFileSelect("README.md")}
       >
         select
+      </button>
+      <button
+        type="button"
+        aria-label="files: select shared README.md"
+        onClick={() => onFileSelect("README.md", "dir_00000000000000000000000000000001")}
+      >
+        select shared
       </button>
       <button
         type="button"
@@ -113,11 +124,13 @@ vi.mock("./FileViewer", () => ({
   FileViewer: ({
     open,
     path,
+    environmentId,
     onClose,
     frameless,
   }: {
     open: boolean;
     path: string;
+    environmentId?: string;
     onClose: () => void;
     frameless?: boolean;
   }) => (
@@ -125,6 +138,7 @@ vi.mock("./FileViewer", () => ({
       data-testid={frameless ? "file-viewer-inline" : "file-viewer"}
       data-state={open ? "open" : "closed"}
       data-path={path}
+      data-environment={environmentId}
     >
       <button type="button" aria-label="file-viewer: close" onClick={onClose}>
         close
@@ -188,11 +202,11 @@ const useConvMock = vi.mocked(useConversations);
 const useTerminalsMock = vi.mocked(useTerminals);
 
 import {
+  useAllWorkspaceChangedFiles,
   useWorkspaceEnvironment,
-  useWorkspaceChangedFiles,
 } from "@/hooks/useWorkspaceChangedFiles";
 const useEnvironmentMock = vi.mocked(useWorkspaceEnvironment);
-const useChangedFilesMock = vi.mocked(useWorkspaceChangedFiles);
+const useChangedFilesMock = vi.mocked(useAllWorkspaceChangedFiles);
 
 import { useChildSessions } from "@/hooks/useChildSessions";
 const useChildSessionsMock = vi.mocked(useChildSessions);
@@ -445,7 +459,7 @@ beforeEach(() => {
   >);
   useChangedFilesMock.mockReset();
   useChangedFilesMock.mockReturnValue({ data: undefined, isLoading: true } as unknown as ReturnType<
-    typeof useWorkspaceChangedFiles
+    typeof useAllWorkspaceChangedFiles
   >);
   // The Chat/TUI toggle persists its position to sessionStorage so leaving
   // and re-entering a conversation restores the last view. Clear
@@ -1941,6 +1955,24 @@ describe("AppShell URL sync — file param", () => {
     expect(pushPanel).toHaveAttribute("data-path", "README.md");
   });
 
+  it("restores and writes root-qualified file deep links", () => {
+    mockConversations([{ id: "conv_abc", permission_level: null }]);
+    const directoryId = "dir_00000000000000000000000000000001";
+
+    renderShell(`/c/conv_abc?file=README.md&directory=${directoryId}`);
+    expect(screen.getByTestId("file-viewer")).toHaveAttribute("data-path", "README.md");
+    expect(screen.getByTestId("file-viewer")).toHaveAttribute("data-environment", directoryId);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "file-viewer: close" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "files: select README.md" }));
+    expect(screen.getByTestId("url-params").textContent).toContain("file=README.md");
+    expect(screen.getByTestId("url-params").textContent).not.toContain("directory=");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "file-viewer: close" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "files: select shared README.md" }));
+    expect(screen.getByTestId("url-params").textContent).toContain(`directory=${directoryId}`);
+  });
+
   it("restores the file viewer into the desktop rail on a ?file= reload", () => {
     // Regression (E2E reload-persistence): the Subagents/Terminals/Todos
     // panels are checked before the file viewer in the rail content
@@ -2150,7 +2182,7 @@ describe("Files scope default and persistence", () => {
       },
       isSuccess: true,
       isLoading: false,
-    } as unknown as ReturnType<typeof useWorkspaceChangedFiles>);
+    } as unknown as ReturnType<typeof useAllWorkspaceChangedFiles>);
   }
 
   it("defaults to All (tree) even when the conversation loads with changes", () => {

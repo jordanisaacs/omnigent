@@ -20,6 +20,7 @@ import {
   isRunnerUnavailable503,
   looksLikeWorkspaceFilePath,
   runnerOfflineRetryDelay,
+  resolveWorkspaceFilePath,
   shouldRetryRunnerOffline,
   toWorkspaceRelativePath,
   useWorkspaceAllFiles,
@@ -747,6 +748,31 @@ describe("toWorkspaceRelativePath", () => {
     // home "/" + "/ws/foo.md" must not become "//ws/foo.md" (which wouldn't
     // match root "/ws"). Guards the trailing-slash strip on home expansion.
     expect(toWorkspaceRelativePath("~/ws/foo.md", "/ws", "/")).toBe("foo.md");
+  });
+});
+
+describe("resolveWorkspaceFilePath", () => {
+  const environments = [
+    { id: "default", root: "/repo/main", home: "/home/u" },
+    {
+      id: "dir_00000000000000000000000000000001",
+      root: "/repo/shared",
+      home: "/home/u",
+    },
+  ];
+
+  it("routes an absolute path to its attached root", () => {
+    expect(resolveWorkspaceFilePath("/repo/shared/src/lib.ts", environments)).toEqual({
+      environmentId: "dir_00000000000000000000000000000001",
+      path: "src/lib.ts",
+    });
+  });
+
+  it("keeps legacy relative paths on the default root", () => {
+    expect(resolveWorkspaceFilePath("src/lib.ts", environments)).toEqual({
+      environmentId: "default",
+      path: "src/lib.ts",
+    });
   });
 });
 
