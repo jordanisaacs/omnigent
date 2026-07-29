@@ -1,5 +1,16 @@
-import "@testing-library/jest-dom/vitest";
-import { vi } from "vitest";
+import * as matchers from "@testing-library/jest-dom/matchers";
+import type { TestingLibraryMatchers } from "@testing-library/jest-dom/matchers";
+import { expect, vi } from "vitest";
+
+// Extend this package's Vitest instance explicitly. In a pnpm workspace,
+// @testing-library/jest-dom/vitest can resolve a different workspace package's
+// Vitest version, leaving both the runtime expect and its types unextended.
+expect.extend(matchers);
+
+declare module "vitest" {
+  interface Assertion<T = any> extends TestingLibraryMatchers<any, T> {}
+  interface AsymmetricMatchersContaining extends TestingLibraryMatchers<any, any> {}
+}
 
 // The @lobehub icon packages have broken nested-module resolution
 // under vitest; stub presentational glyphs so component modules that
