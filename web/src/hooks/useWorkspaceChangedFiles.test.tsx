@@ -125,7 +125,7 @@ function EnvironmentsDataProbe({
   onData,
 }: {
   id: string | undefined;
-  onData: (data: Array<{ id: string; root: string | null }>) => void;
+  onData: (data: Array<{ id: string; name: string; root: string | null }>) => void;
 }) {
   const query = useWorkspaceEnvironments(id);
   useEffect(() => {
@@ -546,13 +546,13 @@ describe("useWorkspaceEnvironments", () => {
           },
           {
             id: "default",
-            name: "Working folder",
+            name: "Primary environment",
             metadata: { filesystem: true, role: "primary", root: "/workspace" },
           },
         ],
       }),
     );
-    const results: Array<Array<{ id: string; root: string | null }>> = [];
+    const results: Array<Array<{ id: string; name: string; root: string | null }>> = [];
 
     render(
       <Wrap>
@@ -566,6 +566,7 @@ describe("useWorkspaceEnvironments", () => {
         "dir_shared",
       ]),
     );
+    expect(results.at(-1)?.[0]?.name).toBe("Working folder");
     expect(fetchMock.mock.calls[0][0]).toBe(
       "/v1/sessions/conv_multi/resources/environments?order=asc&limit=1000",
     );

@@ -797,7 +797,10 @@ async function fetchWorkspaceEnvironments(conversationId: string): Promise<Works
     .filter((resource) => resource.metadata?.filesystem === true && resource.metadata.root)
     .map((resource) => ({
       id: resource.id,
-      name: resource.name ?? resource.id,
+      name:
+        resource.id === DEFAULT_ENVIRONMENT_ID && resource.name === "Primary environment"
+          ? "Working folder"
+          : (resource.name ?? resource.id),
       available: true,
       root: resource.metadata?.root ?? null,
       home: resource.metadata?.home ?? null,
