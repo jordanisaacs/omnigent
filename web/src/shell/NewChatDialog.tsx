@@ -113,6 +113,7 @@ import { readHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreference
 import { readDefaultBaseBranch } from "@/lib/baseBranchPreferences";
 import { readHarnessOptions, writeHarnessOption } from "@/lib/modePreferences";
 import { AUTO_HARNESS_ID, useBrainHarnessLabels } from "@/lib/agentLabels";
+import { normalizeProjectDirectories } from "@/lib/projectsApi";
 import { CLAUDE_NATIVE_MODELS } from "@/lib/claudeNativeModels";
 import { partitionAgentsByKind, sortAgentsForDisplay } from "@/lib/agentGrouping";
 import { cn } from "@/lib/utils";
@@ -2004,6 +2005,7 @@ export function NewChatLandingScreen() {
     return {
       hostId: c.host_id,
       workspace: c.workspace,
+      directories: normalizeProjectDirectories(c.directories, c.workspace).map((d) => d.path),
       agentId: c.agent_id,
       useWorktree: c.use_worktree,
     };
@@ -2477,6 +2479,9 @@ export function NewChatLandingScreen() {
     }
     if (writes.workspace !== undefined) {
       setWorkspace((cur) => (cur === "" ? writes.workspace! : cur));
+    }
+    if (writes.directories !== undefined) {
+      setAdditionalDirectories((cur) => (cur.length === 0 ? writes.directories! : cur));
     }
     setPrefill(step.state);
   }, [
