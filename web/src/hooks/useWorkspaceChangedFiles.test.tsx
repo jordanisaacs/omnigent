@@ -27,6 +27,7 @@ import {
   useWorkspaceChangedFiles,
   useWorkspaceDirectory,
   useWorkspaceEnvironment,
+  useWorkspaceEnvironments,
   useWorkspaceFileExists,
   useWorkspaceFileSearch,
 } from "./useWorkspaceChangedFiles";
@@ -112,6 +113,20 @@ function EnvironmentDataProbe({
   onData: (data: { available: boolean; root: string | null; home: string | null }) => void;
 }) {
   const query = useWorkspaceEnvironment(id);
+  useEffect(() => {
+    if (query.isSuccess) onData(query.data);
+  }, [query.isSuccess, query.data, onData]);
+  return null;
+}
+
+function EnvironmentsDataProbe({
+  id,
+  onData,
+}: {
+  id: string | undefined;
+  onData: (data: Array<{ id: string; root: string | null }>) => void;
+}) {
+  const query = useWorkspaceEnvironments(id);
   useEffect(() => {
     if (query.isSuccess) onData(query.data);
   }, [query.isSuccess, query.data, onData]);
@@ -497,6 +512,47 @@ describe("useWorkspaceEnvironment gating", () => {
     await flushMicrotasks();
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("useWorkspaceEnvironments", () => {
+  it("returns only environments explicitly marked as filesystem roots", async () => {
+    onlineMock.mockReturnValue(true);
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: [
+          {
+            id: "env_terminal_claude_main",
+            name: "Environment for claude:main",
+            metadata: { role: "terminal", root: "/workspace" },
+          },
+          {
+            id: "default",
+            name: "Primary environment",
+            metadata: { filesystem: true, role: "primary", root: "/workspace" },
+          },
+          {
+            id: "dir_shared",
+            name: "shared",
+            metadata: { filesystem: true, role: "project", root: "/shared" },
+          },
+        ],
+      }),
+    );
+    const results: Array<Array<{ id: string; root: string | null }>> = [];
+
+    render(
+      <Wrap>
+        <EnvironmentsDataProbe id="conv_multi" onData={(data) => results.push(data)} />
+      </Wrap>,
+    );
+
+    await waitFor(() =>
+      expect(results.at(-1)?.map((environment) => environment.id)).toEqual([
+        "default",
+        "dir_shared",
+      ]),
+    );
   });
 });
 

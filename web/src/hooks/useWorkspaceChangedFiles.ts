@@ -794,7 +794,7 @@ async function fetchWorkspaceEnvironments(conversationId: string): Promise<Works
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const json = (await res.json()) as WorkspaceEnvironmentsResponse;
   return json.data
-    .filter((resource) => resource.metadata?.filesystem !== false && resource.metadata?.root)
+    .filter((resource) => resource.metadata?.filesystem === true && resource.metadata.root)
     .map((resource) => ({
       id: resource.id,
       name: resource.name ?? resource.id,
