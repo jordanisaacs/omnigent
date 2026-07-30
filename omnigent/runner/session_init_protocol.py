@@ -17,6 +17,7 @@ class RunnerSessionDirectory(BaseModel):
 
     id: str
     path: str
+    nickname: str | None = None
 
 
 class RunnerSessionInitSnapshot(BaseModel):
@@ -71,7 +72,11 @@ def build_runner_session_init_payload(
             updated_at=conversation.updated_at,
             workspace=conversation.workspace,
             directories=[
-                RunnerSessionDirectory(id=directory.id, path=directory.path)
+                RunnerSessionDirectory(
+                    id=directory.id,
+                    path=directory.path,
+                    nickname=directory.nickname,
+                )
                 for directory in conversation.directories
             ],
             labels=conversation.labels,

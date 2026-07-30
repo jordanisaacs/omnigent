@@ -1356,6 +1356,26 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def set_directory_nickname(
+        self,
+        conversation_id: str,
+        directory_id: str,
+        nickname: str | None,
+    ) -> Conversation:
+        """Persist or clear one attached directory's display nickname.
+
+        :param conversation_id: Session/conversation identifier.
+        :param directory_id: Stable attached-directory id.
+        :param nickname: Normalized nickname, or ``None`` to restore the
+            default display name.
+        :returns: The updated :class:`Conversation`.
+        :raises ConversationNotFoundError: If the conversation does not exist.
+        :raises ValueError: If the directory is not attached or the nickname
+            is invalid.
+        """
+        ...
+
+    @abstractmethod
     def set_external_session_id(
         self,
         conversation_id: str,

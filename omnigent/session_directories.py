@@ -11,6 +11,7 @@ from pathlib import PurePath
 DEFAULT_DIRECTORY_ID = "default"
 DIRECTORY_ID_PREFIX = "dir_"
 MAX_SESSION_DIRECTORIES = 16
+MAX_DIRECTORY_NICKNAME_LENGTH = 80
 
 
 @dataclass(frozen=True)
@@ -24,11 +25,26 @@ class SessionDirectory:
 
     id: str
     path: str
+    nickname: str | None = None
+
+    @property
+    def basename(self) -> str:
+        """Return the physical directory basename."""
+        return PurePath(self.path).name or self.path
 
     @property
     def name(self) -> str:
-        """Return a compact display name without making it an identity."""
-        return PurePath(self.path).name or self.path
+        """Return the persisted nickname or physical directory basename."""
+        return self.nickname or self.basename
+
+    @property
+    def environment_name(self) -> str:
+        """Return the environment label shown by filesystem clients."""
+        if self.nickname:
+            return self.nickname
+        if self.id == DEFAULT_DIRECTORY_ID:
+            return "Working folder"
+        return self.basename
 
     def as_dict(self) -> dict[str, str]:
         """Return the public JSON representation."""
@@ -52,6 +68,22 @@ def validate_directory_id(directory_id: str) -> str:
     ):
         raise ValueError(f"invalid session directory id: {directory_id!r}")
     return directory_id
+
+
+def normalize_directory_nickname(nickname: str | None) -> str | None:
+    """Validate and normalize an optional user-facing directory nickname."""
+    if nickname is None:
+        return None
+    normalized = nickname.strip()
+    if not normalized:
+        raise ValueError("directory nickname must not be blank")
+    if "\n" in normalized or "\r" in normalized:
+        raise ValueError("directory nickname must be a single line")
+    if len(normalized) > MAX_DIRECTORY_NICKNAME_LENGTH:
+        raise ValueError(
+            f"directory nickname must be at most {MAX_DIRECTORY_NICKNAME_LENGTH} characters"
+        )
+    return normalized
 
 
 def build_session_directories(
@@ -86,6 +118,10 @@ def validate_session_directories(
         if not directory.path:
             raise ValueError("session directory paths must be non-empty")
         validate_directory_id(directory.id)
+        if directory.nickname is not None:
+            normalized = normalize_directory_nickname(directory.nickname)
+            if normalized != directory.nickname:
+                raise ValueError("directory nickname must not have surrounding whitespace")
     return values
 
 
@@ -144,9 +180,37 @@ def encode_session_directories(directories: Iterable[SessionDirectory]) -> str |
     if not values:
         return None
     return json.dumps(
-        [{"id": directory.id, "path": directory.path} for directory in values],
+        [
+            {
+                "id": directory.id,
+                "path": directory.path,
+                **({"nickname": directory.nickname} if directory.nickname is not None else {}),
+            }
+            for directory in values
+        ],
         separators=(",", ":"),
     )
+
+
+def replace_directory_nickname(
+    directories: Iterable[SessionDirectory],
+    directory_id: str,
+    nickname: str | None,
+) -> tuple[SessionDirectory, ...]:
+    """Replace one attached directory's nickname while preserving its identity."""
+    values = validate_session_directories(directories)
+    normalized = normalize_directory_nickname(nickname)
+    found = False
+    updated: list[SessionDirectory] = []
+    for directory in values:
+        if directory.id != directory_id:
+            updated.append(directory)
+            continue
+        found = True
+        updated.append(SessionDirectory(directory.id, directory.path, normalized))
+    if not found:
+        raise ValueError(f"directory {directory_id!r} is not attached to the session")
+    return validate_session_directories(updated)
 
 
 def replace_default_directory(
@@ -155,9 +219,20 @@ def replace_default_directory(
 ) -> tuple[SessionDirectory, ...]:
     """Set the primary workspace while preserving additional stable roots."""
     values = validate_session_directories(directories)
+    current_default = next(
+        (directory for directory in values if directory.id == DEFAULT_DIRECTORY_ID),
+        None,
+    )
     additional = tuple(directory for directory in values if directory.id != DEFAULT_DIRECTORY_ID)
     return validate_session_directories(
-        (SessionDirectory(DEFAULT_DIRECTORY_ID, workspace), *additional)
+        (
+            SessionDirectory(
+                DEFAULT_DIRECTORY_ID,
+                workspace,
+                current_default.nickname if current_default is not None else None,
+            ),
+            *additional,
+        )
     )
 
 
@@ -180,8 +255,11 @@ def decode_session_directories(
             raise ValueError("stored session directory entries must be objects")
         directory_id = value.get("id")
         path = value.get("path")
+        nickname = value.get("nickname")
         if not isinstance(directory_id, str) or not isinstance(path, str):
             raise ValueError("stored session directories require string id and path")
-        directories.append(SessionDirectory(directory_id, path))
+        if nickname is not None and not isinstance(nickname, str):
+            raise ValueError("stored session directory nickname must be a string or null")
+        directories.append(SessionDirectory(directory_id, path, nickname))
     values = validate_session_directories(directories)
     return validate_workspace_directory_consistency(values, workspace)

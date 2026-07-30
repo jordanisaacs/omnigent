@@ -568,9 +568,12 @@ def _session_directories_from_wire(
             raise ValueError("session directory entries must be objects")
         directory_id = item.get("id")
         path = item.get("path")
+        nickname = item.get("nickname")
         if not isinstance(directory_id, str) or not isinstance(path, str):
             raise ValueError("session directory entries require string id and path")
-        directories.append(SessionDirectory(directory_id, path))
+        if nickname is not None and not isinstance(nickname, str):
+            raise ValueError("session directory nickname must be a string or null")
+        directories.append(SessionDirectory(directory_id, path, nickname))
     return validate_session_directories(directories)
 
 
@@ -2314,7 +2317,7 @@ def create_runner_app(
             created_at=float(snapshot.created_at),
             workspace=snapshot.workspace,
             directories=tuple(
-                SessionDirectory(directory.id, directory.path)
+                SessionDirectory(directory.id, directory.path, directory.nickname)
                 for directory in snapshot.directories
             ),
             agent_id=agent_id,
@@ -2324,7 +2327,8 @@ def create_runner_app(
         _session_start_cache[session_id] = float(snapshot.created_at)
         _session_workspace_cache[session_id] = snapshot.workspace
         _session_directories_cache[session_id] = tuple(
-            SessionDirectory(directory.id, directory.path) for directory in snapshot.directories
+            SessionDirectory(directory.id, directory.path, directory.nickname)
+            for directory in snapshot.directories
         )
         if _session_directories_cache[session_id] or snapshot.parent_session_id is not None:
             resource_registry.configure_session_directories(

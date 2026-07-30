@@ -58,7 +58,7 @@ def _conversation() -> Conversation:
         workspace="/tmp/workspace",
         directories=(
             SessionDirectory("default", "/tmp/workspace"),
-            SessionDirectory(f"dir_{1:032x}", "/tmp/shared"),
+            SessionDirectory(f"dir_{1:032x}", "/tmp/shared", nickname="Shared services"),
         ),
         labels={"example": "value"},
     )
@@ -85,8 +85,12 @@ async def test_initializer_shares_result_for_one_tunnel_generation() -> None:
     assert len(client.calls) == 1
     assert client.calls[0]["session_init"]["snapshot"]["workspace"] == "/tmp/workspace"
     assert client.calls[0]["session_init"]["snapshot"]["directories"] == [
-        {"id": "default", "path": "/tmp/workspace"},
-        {"id": f"dir_{1:032x}", "path": "/tmp/shared"},
+        {"id": "default", "path": "/tmp/workspace", "nickname": None},
+        {
+            "id": f"dir_{1:032x}",
+            "path": "/tmp/shared",
+            "nickname": "Shared services",
+        },
     ]
 
     cached = await initializer.initialize(conversation, client, timeout=10)  # type: ignore[arg-type]

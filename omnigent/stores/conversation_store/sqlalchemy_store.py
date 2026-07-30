@@ -77,6 +77,7 @@ from omnigent.session_directories import (
     decode_session_directories,
     encode_session_directories,
     replace_default_directory,
+    replace_directory_nickname,
     validate_workspace_directory_consistency,
 )
 from omnigent.session_import.models import (
@@ -3071,6 +3072,36 @@ class SqlAlchemyConversationStore(ConversationStore):
                 )
             if git_branch is not None:
                 meta.git_branch = git_branch
+        with self._conv_session() as ap_sess:
+            ap_row = ap_sess.get(SqlConversation, (current_workspace_id(), conversation_id))
+            if ap_row is None:
+                raise ConversationNotFoundError(
+                    f"conversation {conversation_id!r} does not exist",
+                )
+            ap_row.updated_at = now_epoch()
+            labels = _fetch_labels(ap_sess, conversation_id)
+        return _to_conversation(ap_row, meta, labels)
+
+    def set_directory_nickname(
+        self,
+        conversation_id: str,
+        directory_id: str,
+        nickname: str | None,
+    ) -> Conversation:
+        """Persist or clear one attached directory's display nickname."""
+        with self._session() as session:
+            meta = session.get(SqlConversationMetadata, (current_workspace_id(), conversation_id))
+            if meta is None:
+                raise ConversationNotFoundError(
+                    f"conversation {conversation_id!r} does not exist",
+                )
+            directories = decode_session_directories(
+                meta.directories,
+                workspace=meta.workspace,
+            )
+            meta.directories = encode_session_directories(
+                replace_directory_nickname(directories, directory_id, nickname)
+            )
         with self._conv_session() as ap_sess:
             ap_row = ap_sess.get(SqlConversation, (current_workspace_id(), conversation_id))
             if ap_row is None:

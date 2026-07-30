@@ -12,6 +12,7 @@ from omnigent.session_directories import (
     decode_session_directories,
     encode_session_directories,
     replace_default_directory,
+    replace_directory_nickname,
     select_session_directories,
     validate_session_directories,
 )
@@ -27,7 +28,10 @@ def _directory(index: int, path: str | None = None) -> SessionDirectory:
 
 def test_encode_decode_round_trip_and_legacy_workspace_fallback() -> None:
     """Stored ids round-trip while old workspace-only rows gain ``default``."""
-    values = (SessionDirectory(DEFAULT_DIRECTORY_ID, "/repo/main"), _directory(1))
+    values = (
+        SessionDirectory(DEFAULT_DIRECTORY_ID, "/repo/main"),
+        SessionDirectory(f"dir_{1:032x}", "/repo/1", nickname="Shared API"),
+    )
 
     encoded = encode_session_directories(values)
 
@@ -37,6 +41,32 @@ def test_encode_decode_round_trip_and_legacy_workspace_fallback() -> None:
         SessionDirectory(DEFAULT_DIRECTORY_ID, "/repo/legacy"),
     )
     assert decode_session_directories(None, workspace="   ") == ()
+
+
+def test_directory_nicknames_override_display_names_and_can_be_cleared() -> None:
+    """Nicknames are optional metadata; clearing restores stable defaults."""
+    values = (
+        SessionDirectory(DEFAULT_DIRECTORY_ID, "/repo/main"),
+        _directory(1, "/repo/shared"),
+    )
+
+    assert values[0].environment_name == "Working folder"
+    assert values[1].environment_name == "shared"
+
+    renamed = replace_directory_nickname(values, values[1].id, "Shared services")
+    assert renamed[1].nickname == "Shared services"
+    assert renamed[1].name == "Shared services"
+    assert renamed[1].environment_name == "Shared services"
+
+    cleared = replace_directory_nickname(renamed, values[1].id, None)
+    assert cleared[1].nickname is None
+    assert cleared[1].environment_name == "shared"
+
+    with pytest.raises(ValueError, match="not attached"):
+        replace_directory_nickname(values, f"dir_{99:032x}", "Missing")
+
+    with pytest.raises(ValueError, match="must not be blank"):
+        replace_directory_nickname(values, values[1].id, "   ")
 
 
 def test_child_scope_inherits_all_or_an_explicit_subset_in_parent_order() -> None:
@@ -89,10 +119,16 @@ def test_store_round_trips_stable_directories_and_host_rebinds(db_uri: str) -> N
     assert fetched is not None
     assert fetched.directories == directories
 
+    renamed = store.set_directory_nickname(created.id, directories[1].id, "Shared services")
+    assert renamed.directories[1].nickname == "Shared services"
+    fetched_after_rename = store.get_conversation(created.id)
+    assert fetched_after_rename is not None
+    assert fetched_after_rename.directories[1].nickname == "Shared services"
+
     rebound = store.set_host_id(created.id, "1" * 32, workspace="/repo/rebound")
     assert rebound.workspace == "/repo/rebound"
     assert rebound.directories[0] == SessionDirectory(DEFAULT_DIRECTORY_ID, "/repo/rebound")
-    assert rebound.directories[1:] == directories[1:]
+    assert rebound.directories[1].nickname == "Shared services"
 
     cleared = store.clear_host_binding(created.id)
     assert cleared.workspace is None
