@@ -116,7 +116,7 @@ def default_environment_resource(
         id=DEFAULT_ENVIRONMENT_ID,
         type="environment",
         session_id=session_id,
-        name="Primary environment",
+        name="Working folder",
         metadata=metadata,
     )
 
@@ -149,7 +149,7 @@ def directory_environment_resource(
         id=directory.id,
         type="environment",
         session_id=session_id,
-        name="Primary environment" if directory.id == DEFAULT_ENVIRONMENT_ID else directory.name,
+        name=directory.environment_name,
         metadata=metadata,
     )
 

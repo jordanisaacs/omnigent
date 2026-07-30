@@ -363,10 +363,10 @@ def register_resources_routes(
         )
         if directory is not None:
             root = directory.path
-            name = "Primary environment" if environment_id == "default" else directory.name
+            name = directory.environment_name
         elif environment_id == "default" and conv.workspace:
             root = conv.workspace
-            name = "Primary environment"
+            name = "Working folder"
         else:
             return None
 
@@ -574,6 +574,37 @@ def register_resources_routes(
     # Typed collection routes registered BEFORE /{resource_id} so
     # "environments", "terminals", "files" are not captured as ids.
 
+    def _environment_name(conv: Conversation, environment_id: str) -> str | None:
+        """Return the persisted display label for an attached environment."""
+        directory = next(
+            (item for item in conv.directories if item.id == environment_id),
+            None,
+        )
+        if directory is not None:
+            return directory.environment_name
+        if environment_id == "default":
+            return "Working folder"
+        return None
+
+    def _overlay_environment_names(
+        payload: dict[str, Any],
+        conv: Conversation,
+    ) -> dict[str, Any]:
+        """Overlay durable names when a running runner has stale metadata."""
+        data = payload.get("data")
+        if not isinstance(data, list):
+            name = _environment_name(conv, str(payload.get("id", "")))
+            return {**payload, "name": name} if name is not None else payload
+
+        named_resources: list[Any] = []
+        for resource in data:
+            if not isinstance(resource, dict):
+                named_resources.append(resource)
+                continue
+            name = _environment_name(conv, str(resource.get("id", "")))
+            named_resources.append({**resource, "name": name} if name is not None else resource)
+        return {**payload, "data": named_resources}
+
     @router.get(
         "/sessions/{session_id}/resources/environments",
         response_model=None,
@@ -589,10 +620,20 @@ def register_resources_routes(
         :param session_id: Session/conversation identifier.
         :returns: ``PaginatedList`` of environment resources.
         """
-        await _validate_session(session_id, request, LEVEL_READ)
+        conv = await _validate_session(session_id, request, LEVEL_READ)
         path = f"/v1/sessions/{session_id}/resources/environments"
+        forwarded = {
+            key: value
+            for key, value in request.query_params.items()
+            if key in ("limit", "after", "before", "order")
+        }
         try:
-            return await _proxy_get_to_runner(session_id, path)
+            payload = await _proxy_get_to_runner(
+                session_id,
+                path,
+                params=forwarded or None,
+            )
+            return _overlay_environment_names(payload, conv)
         except OmnigentError as exc:
             if exc.code != ErrorCode.RUNNER_UNAVAILABLE:
                 raise
@@ -623,6 +664,55 @@ def register_resources_routes(
                 "has_more": False,
             }
 
+    @router.patch(
+        "/sessions/{session_id}/resources/environments/{environment_id}",
+        response_model=None,
+        dependencies=[Depends(require_json_content_type)],
+    )
+    async def rename_session_environment(
+        request: Request,
+        session_id: str,
+        environment_id: str,
+    ) -> dict[str, Any]:
+        """Persist or clear one attached environment's editable nickname."""
+        await _validate_session(session_id, request, LEVEL_EDIT)
+        body = await request.json()
+        if not isinstance(body, dict) or "name" not in body:
+            raise OmnigentError(
+                "'name' is required",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        nickname = body["name"]
+        if nickname is not None and not isinstance(nickname, str):
+            raise OmnigentError(
+                "'name' must be a string or null",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        try:
+            updated = await asyncio.to_thread(
+                conversation_store.set_directory_nickname,
+                session_id,
+                environment_id,
+                nickname,
+            )
+        except ValueError as exc:
+            raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
+        directory = next(item for item in updated.directories if item.id == environment_id)
+        return {
+            "id": directory.id,
+            "object": "session.resource",
+            "type": "environment",
+            "session_id": session_id,
+            "name": directory.environment_name,
+            "metadata": {
+                "environment_type": "caller_process",
+                "role": "primary" if directory.id == "default" else "project",
+                "root": directory.path,
+                "directory_id": directory.id,
+                "filesystem": True,
+            },
+        }
+
     @router.get(
         "/sessions/{session_id}/resources/environments/{environment_id}",
         response_model=None,
@@ -641,10 +731,11 @@ def register_resources_routes(
             e.g. ``"default"``.
         :returns: The environment resource object.
         """
-        await _validate_session(session_id, request, LEVEL_READ)
+        conv = await _validate_session(session_id, request, LEVEL_READ)
         path = f"/v1/sessions/{session_id}/resources/environments/{environment_id}"
         try:
-            return await _proxy_get_to_runner(session_id, path)
+            payload = await _proxy_get_to_runner(session_id, path)
+            return _overlay_environment_names(payload, conv)
         except OmnigentError as exc:
             if exc.code != ErrorCode.RUNNER_UNAVAILABLE:
                 raise
