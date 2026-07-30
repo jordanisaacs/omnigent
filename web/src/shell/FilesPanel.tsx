@@ -1,6 +1,8 @@
 import {
   ArrowDownAZIcon,
   ArrowDownWideNarrowIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   EyeIcon,
   EyeOffIcon,
   FileClockIcon,
@@ -307,6 +309,9 @@ export function FilesPanel({
   const [treeExclude, setTreeExclude] = useState("");
   const [debouncedTreeExclude, setDebouncedTreeExclude] = useState("");
   const [showSearchFilters, setShowSearchFilters] = useState(false);
+  const [collapsedEnvironmentIds, setCollapsedEnvironmentIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   // The drawer (onClose) adds an X close button to the header. Both the drawer
   // and the inline rail (frameless) fill their parent's height and drop the
   // rounded card chrome; only the standalone card caps content at max-h.
@@ -342,6 +347,19 @@ export function FilesPanel({
     }, 300);
     return () => clearTimeout(timer);
   }, [treeSearch, treeInclude, treeExclude]);
+
+  useEffect(() => {
+    setCollapsedEnvironmentIds(new Set());
+  }, [conversationId]);
+
+  function toggleEnvironment(environmentId: string) {
+    setCollapsedEnvironmentIds((current) => {
+      const next = new Set(current);
+      if (next.has(environmentId)) next.delete(environmentId);
+      else next.add(environmentId);
+      return next;
+    });
+  }
 
   // Highlight the filters toggle when include/exclude carry a value.
   const treeFiltersActive = treeInclude.trim().length > 0 || treeExclude.trim().length > 0;
@@ -511,22 +529,33 @@ export function FilesPanel({
                       (file.environment_id ?? DEFAULT_WORKSPACE_ENVIRONMENT_ID) === environment.id,
                   )
                 : changedQuery.data?.data;
+              const collapsed = environment ? collapsedEnvironmentIds.has(environment.id) : false;
               return (
                 <div key={environment?.id ?? "loading"}>
-                  {environment && <DirectoryGroupHeader environment={environment} />}
-                  <FlatFileList
-                    files={files}
-                    isLoading={changedQuery.isLoading}
-                    isError={changedQuery.isError}
-                    error={changedQuery.error}
-                    onFileSelect={onFileSelect}
-                    showHidden={showHidden}
-                    onShowHidden={() => onShowHiddenChange(true)}
-                    searchQuery={changedSearch}
-                    sort={changedSort}
-                    conversationId={conversationId}
-                    runnerWentOffline={runnerWentOffline}
-                  />
+                  {environment && (
+                    <DirectoryGroupHeader
+                      environment={environment}
+                      collapsed={collapsed}
+                      onToggle={() => toggleEnvironment(environment.id)}
+                    />
+                  )}
+                  {!collapsed && (
+                    <div id={environment ? environmentContentId(environment.id) : undefined}>
+                      <FlatFileList
+                        files={files}
+                        isLoading={changedQuery.isLoading}
+                        isError={changedQuery.isError}
+                        error={changedQuery.error}
+                        onFileSelect={onFileSelect}
+                        showHidden={showHidden}
+                        onShowHidden={() => onShowHiddenChange(true)}
+                        searchQuery={changedSearch}
+                        sort={changedSort}
+                        conversationId={conversationId}
+                        runnerWentOffline={runnerWentOffline}
+                      />
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -550,6 +579,8 @@ export function FilesPanel({
                 searchQuery={debouncedTreeSearch}
                 include={debouncedTreeInclude}
                 exclude={debouncedTreeExclude}
+                collapsed={collapsedEnvironmentIds.has(environment.id)}
+                onToggle={() => toggleEnvironment(environment.id)}
               />
             ))}
           </div>
@@ -559,12 +590,36 @@ export function FilesPanel({
   );
 }
 
-function DirectoryGroupHeader({ environment }: { environment: WorkspaceEnvironment }) {
+function environmentContentId(environmentId: string): string {
+  return `files-environment-${environmentId}`;
+}
+
+function DirectoryGroupHeader({
+  environment,
+  collapsed,
+  onToggle,
+}: {
+  environment: WorkspaceEnvironment;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
   return (
-    <div className="mb-1 flex min-w-0 items-center gap-2 border-b border-border px-2 pb-1">
+    <button
+      type="button"
+      aria-controls={environmentContentId(environment.id)}
+      aria-expanded={!collapsed}
+      aria-label={`${collapsed ? "Expand" : "Collapse"} ${environment.name} folder`}
+      className="mb-1 flex w-full min-w-0 cursor-pointer items-center gap-1 border-b border-border px-2 pb-1 text-left hover:bg-muted/50"
+      onClick={onToggle}
+    >
+      {collapsed ? (
+        <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+      ) : (
+        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+      )}
       <span className="truncate font-medium text-xs">{environment.name}</span>
       {environment.root && <WorkingDirLabel dir={environment.root} />}
-    </div>
+    </button>
   );
 }
 
@@ -580,6 +635,8 @@ function RootFolderTree({
   searchQuery,
   include,
   exclude,
+  collapsed,
+  onToggle,
 }: {
   conversationId: string | undefined;
   environment: WorkspaceEnvironment;
@@ -592,6 +649,8 @@ function RootFolderTree({
   searchQuery: string;
   include: string;
   exclude: string;
+  collapsed: boolean;
+  onToggle: () => void;
 }) {
   const filesQuery = useWorkspaceAllFilesForEnvironment(conversationId, environment.id);
   const searchQueryResult = useWorkspaceFileSearch(conversationId, searchQuery, include, exclude, {
@@ -602,26 +661,30 @@ function RootFolderTree({
   });
   return (
     <div>
-      <DirectoryGroupHeader environment={environment} />
-      <FolderTree
-        files={filesQuery.data?.data}
-        isLoading={filesQuery.isLoading}
-        isError={filesQuery.isError}
-        error={filesQuery.error}
-        onFileSelect={(path) => onFileSelect(path, environment.id)}
-        conversationId={conversationId}
-        showHidden={showHidden}
-        onShowHidden={onShowHidden}
-        changedFiles={changedFiles}
-        sort={sort}
-        runnerWentOffline={runnerWentOffline}
-        searchQuery={searchQuery}
-        searchResults={searchQueryResult.data}
-        isSearching={searchQueryResult.isFetching}
-        isSearchError={searchQueryResult.isError}
-        searchError={searchQueryResult.error instanceof Error ? searchQueryResult.error : null}
-        environmentId={environment.id}
-      />
+      <DirectoryGroupHeader environment={environment} collapsed={collapsed} onToggle={onToggle} />
+      {!collapsed && (
+        <div id={environmentContentId(environment.id)}>
+          <FolderTree
+            files={filesQuery.data?.data}
+            isLoading={filesQuery.isLoading}
+            isError={filesQuery.isError}
+            error={filesQuery.error}
+            onFileSelect={(path) => onFileSelect(path, environment.id)}
+            conversationId={conversationId}
+            showHidden={showHidden}
+            onShowHidden={onShowHidden}
+            changedFiles={changedFiles}
+            sort={sort}
+            runnerWentOffline={runnerWentOffline}
+            searchQuery={searchQuery}
+            searchResults={searchQueryResult.data}
+            isSearching={searchQueryResult.isFetching}
+            isSearchError={searchQueryResult.isError}
+            searchError={searchQueryResult.error instanceof Error ? searchQueryResult.error : null}
+            environmentId={environment.id}
+          />
+        </div>
+      )}
     </div>
   );
 }

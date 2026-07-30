@@ -283,6 +283,90 @@ describe("FilesPanel attached directories", () => {
       "dir_00000000000000000000000000000001",
     );
   });
+
+  it("collapses each root independently in Changed view", () => {
+    renderPanel({
+      conversationId: "conv_multi_changed_collapse",
+      flatView: true,
+      files: [],
+      environments: [
+        {
+          id: "default",
+          name: "main",
+          available: true,
+          root: "/repo/main",
+          home: null,
+        },
+        {
+          id: "dir_shared",
+          name: "shared",
+          available: true,
+          root: "/repo/shared",
+          home: null,
+        },
+      ],
+      changedFiles: [
+        {
+          ...changedFile("main-only.txt"),
+          environment_id: "default",
+          directory_id: "default",
+        },
+        {
+          ...changedFile("shared-only.txt"),
+          environment_id: "dir_shared",
+          directory_id: "dir_shared",
+        },
+      ],
+    });
+
+    const mainToggle = screen.getByRole("button", { name: "Collapse main folder" });
+    expect(mainToggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(mainToggle);
+
+    expect(mainToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("main-only.txt")).toBeNull();
+    expect(screen.getByText("shared-only.txt")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse shared folder" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+
+  it("collapses each root independently in All view", () => {
+    renderPanel({
+      conversationId: "conv_multi_all_collapse",
+      files: [file("README.md")],
+      environments: [
+        {
+          id: "default",
+          name: "main",
+          available: true,
+          root: "/repo/main",
+          home: null,
+        },
+        {
+          id: "dir_shared",
+          name: "shared",
+          available: true,
+          root: "/repo/shared",
+          home: null,
+        },
+      ],
+    });
+
+    expect(screen.getAllByText("README.md")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse main folder" }));
+
+    expect(screen.getAllByText("README.md")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Expand main folder" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "Collapse shared folder" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
 });
 
 describe("FilesPanel working folder header role", () => {
