@@ -1,12 +1,12 @@
 import {
   ArrowDownAZIcon,
   ArrowDownWideNarrowIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
   EyeIcon,
   EyeOffIcon,
   FileClockIcon,
   FileTypeIcon,
+  FolderIcon,
   FolderTreeIcon,
   ListIcon,
   MoonIcon,
@@ -609,16 +609,22 @@ function DirectoryGroupHeader({
       aria-controls={environmentContentId(environment.id)}
       aria-expanded={!collapsed}
       aria-label={`${collapsed ? "Expand" : "Collapse"} ${environment.name} folder`}
-      className="mb-1 flex w-full min-w-0 cursor-pointer items-center gap-1 border-b border-border px-2 pb-1 text-left hover:bg-muted/50"
+      className="group mb-1 flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md border border-border bg-muted/30 px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/40"
       onClick={onToggle}
     >
-      {collapsed ? (
-        <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
-      ) : (
-        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+      <ChevronRightIcon
+        className={cn(
+          "size-3.5 shrink-0 text-muted-foreground transition-transform",
+          !collapsed && "rotate-90",
+        )}
+      />
+      <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 truncate font-medium text-foreground text-xs">
+        {environment.name}
+      </span>
+      {environment.root && dirBasename(environment.root) !== environment.name && (
+        <WorkingDirLabel dir={environment.root} />
       )}
-      <span className="truncate font-medium text-xs">{environment.name}</span>
-      {environment.root && <WorkingDirLabel dir={environment.root} />}
     </button>
   );
 }
@@ -698,11 +704,11 @@ function WorkingDirLabel({ dir }: { dir: string }) {
   // Inner span is the actual tooltip trigger so Radix anchors the popup to
   // the text's bounding rect (not the full flex-1 width).
   return (
-    <span className="min-w-0 flex-1 flex items-center overflow-hidden">
+    <span className="ml-auto flex min-w-0 flex-1 items-center justify-end overflow-hidden pl-2">
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="inline-block max-w-full truncate font-mono text-[11px] text-muted-foreground cursor-default">
+            <span className="inline-block max-w-full cursor-default truncate font-mono text-[10px] text-muted-foreground">
               {dirBasename(dir)}
             </span>
           </TooltipTrigger>

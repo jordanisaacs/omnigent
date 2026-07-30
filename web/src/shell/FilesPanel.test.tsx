@@ -213,6 +213,15 @@ describe("FilesPanel working folder directory", () => {
       conversationId: "conv_wdir_title",
       files: [],
       workingDir: "/home/user/my-project",
+      environments: [
+        {
+          id: "default",
+          name: "Primary environment",
+          available: true,
+          root: "/home/user/my-project",
+          home: null,
+        },
+      ],
     });
     const el = screen
       .getAllByText("my-project")
@@ -330,6 +339,29 @@ describe("FilesPanel attached directories", () => {
       "aria-expanded",
       "true",
     );
+  });
+
+  it("styles roots as section headers without repeating the root basename", () => {
+    renderPanel({
+      conversationId: "conv_multi_root_headers",
+      flatView: true,
+      files: [],
+      environments: [
+        {
+          id: "dir_shared",
+          name: "shared",
+          available: true,
+          root: "/repo/shared",
+          home: null,
+        },
+      ],
+      changedFiles: [],
+    });
+
+    const header = screen.getByRole("button", { name: "Collapse shared folder" });
+    expect(header).toHaveClass("rounded-md", "border", "bg-muted/30");
+    expect(header.querySelector(".lucide-folder")).not.toBeNull();
+    expect(within(header).getAllByText("shared")).toHaveLength(1);
   });
 
   it("collapses each root independently in All view", () => {
