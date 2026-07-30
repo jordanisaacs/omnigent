@@ -69,6 +69,19 @@ def test_directory_nicknames_override_display_names_and_can_be_cleared() -> None
         replace_directory_nickname(values, values[1].id, "   ")
 
 
+def test_build_uses_requested_alias_basename_for_canonicalized_directory() -> None:
+    """A symlinked input keeps its picked basename as the default title."""
+    directories = build_session_directories(
+        "/repo/main",
+        ["/mnt/repos/shared-services"],
+        requested_additional_paths=["/repo/shared"],
+    )
+
+    assert directories[1].path == "/mnt/repos/shared-services"
+    assert directories[1].nickname == "shared"
+    assert directories[1].environment_name == "shared"
+
+
 def test_child_scope_inherits_all_or_an_explicit_subset_in_parent_order() -> None:
     """Omitted, empty, and subset scopes have distinct stable semantics."""
     values = (

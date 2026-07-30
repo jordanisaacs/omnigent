@@ -5501,6 +5501,7 @@ async def _create_session_from_existing_agent(
             session_directories = build_session_directories(
                 canonical_workspace,
                 canonical_additional_paths,
+                requested_additional_paths=(directory.path for directory in body.directories),
             )
     except ValueError as exc:
         if (

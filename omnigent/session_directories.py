@@ -89,16 +89,57 @@ def normalize_directory_nickname(nickname: str | None) -> str | None:
 def build_session_directories(
     workspace: str | None,
     additional_paths: Iterable[str] = (),
+    *,
+    requested_additional_paths: Iterable[str] | None = None,
 ) -> tuple[SessionDirectory, ...]:
-    """Build a new session directory set from canonical paths."""
+    """Build a new session directory set from canonical paths.
+
+    When a host resolves a picked symlink, ``additional_paths`` contains the
+    canonical target while ``requested_additional_paths`` retains the path the
+    user selected. If their basenames differ, preserve the selected basename as
+    the initial nickname so the UI does not replace the link name with its
+    target's name.
+    """
+    canonical_paths = tuple(additional_paths)
+    requested_paths = (
+        canonical_paths
+        if requested_additional_paths is None
+        else tuple(requested_additional_paths)
+    )
+    if len(requested_paths) != len(canonical_paths):
+        raise ValueError("requested and canonical additional directory counts must match")
+
     directories: list[SessionDirectory] = []
     if workspace is not None and workspace.strip():
         directories.append(SessionDirectory(DEFAULT_DIRECTORY_ID, workspace))
     directories.extend(
-        SessionDirectory(generate_directory_id(), path) for path in additional_paths
+        SessionDirectory(
+            generate_directory_id(),
+            canonical_path,
+            _requested_directory_nickname(requested_path, canonical_path),
+        )
+        for requested_path, canonical_path in zip(
+            requested_paths,
+            canonical_paths,
+            strict=True,
+        )
     )
     validate_session_directories(directories)
     return tuple(directories)
+
+
+def _requested_directory_nickname(requested_path: str, canonical_path: str) -> str | None:
+    """Return a safe picked-path basename when canonicalization changes it."""
+    requested_name = PurePath(requested_path).name or requested_path
+    canonical_name = PurePath(canonical_path).name or canonical_path
+    if requested_name == canonical_name:
+        return None
+    try:
+        return normalize_directory_nickname(requested_name)
+    except ValueError:
+        # A filesystem basename can exceed the editable nickname limit. Keep
+        # creation working and fall back to the canonical basename in that case.
+        return None
 
 
 def validate_session_directories(
