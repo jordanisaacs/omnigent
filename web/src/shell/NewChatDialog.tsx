@@ -3037,6 +3037,14 @@ export function NewChatLandingScreen() {
     setAdditionalDirectoryPopoverOpen(false);
   }
 
+  function setAddDirectoryPopoverOpen(open: boolean): void {
+    // Each fresh browse starts from the primary working directory. A user can
+    // still navigate anywhere on the host while the picker is open, but an
+    // abandoned browse should not become the next add-folder default.
+    if (open) setAdditionalDirectoryCandidate(normalizedWorkspace ?? "");
+    setAdditionalDirectoryPopoverOpen(open);
+  }
+
   return (
     // pb-12 lifts the content slightly above the geometric center, where
     // the hero reads better optically.
@@ -3780,7 +3788,7 @@ export function NewChatLandingScreen() {
               {!sandboxSelected && additionalDirectories.length < 15 && (
                 <Popover
                   open={additionalDirectoryPopoverOpen}
-                  onOpenChange={setAdditionalDirectoryPopoverOpen}
+                  onOpenChange={setAddDirectoryPopoverOpen}
                 >
                   <PopoverTrigger asChild>
                     <button

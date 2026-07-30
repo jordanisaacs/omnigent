@@ -1685,6 +1685,33 @@ describe("NewChatLandingScreen", () => {
     expect(body.directories).toEqual([{ path: "/Users/corey/repo/shared" }]);
   });
 
+  it("starts each add-folder browse from the workspace directory", async () => {
+    useHostFilesystemMock.mockReturnValue({
+      data: { entries: [fsEntry("/Users/corey/repo/shared")], truncated: false },
+      isLoading: false,
+      error: null,
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostFilesystem>);
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
+    );
+
+    const addFolder = screen.getByTestId("new-chat-landing-add-directory-chip");
+    fireEvent.click(addFolder);
+    expect(screen.getByTestId("workspace-picker-path-input")).toHaveValue("/Users/corey/repo");
+
+    fireEvent.click(screen.getByTestId("workspace-picker-entry-shared"));
+    expect(screen.getByTestId("workspace-picker-path-input")).toHaveValue(
+      "/Users/corey/repo/shared",
+    );
+    closeMenu();
+    await waitFor(() => expect(screen.queryByTestId("workspace-picker")).toBeNull());
+
+    fireEvent.click(addFolder);
+    expect(screen.getByTestId("workspace-picker-path-input")).toHaveValue("/Users/corey/repo");
+  });
+
   it("hides the sandbox option when the server doesn't support managed sandboxes", () => {
     // Default renderLanding: managed_sandboxes_enabled false (the fail-closed
     // probe sentinel). The dropdown must not advertise a create path the
