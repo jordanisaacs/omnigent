@@ -700,9 +700,7 @@ function DirectoryGroupHeader({
             <span className="min-w-0 truncate font-semibold text-foreground text-xs tracking-tight">
               {environment.name}
             </span>
-            {environment.root && dirBasename(environment.root) !== environment.name && (
-              <WorkingDirLabel dir={environment.root} />
-            )}
+            {environment.root && <WorkingDirLabel dir={environment.root} />}
           </button>
           <button
             type="button"
@@ -808,7 +806,7 @@ function WorkingDirLabel({ dir }: { dir: string }) {
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="inline-block max-w-full cursor-default truncate font-mono text-[10px] text-muted-foreground">
+            <span className="inline-block max-w-full cursor-default truncate font-mono font-normal text-[10px] text-muted-foreground">
               {dirBasename(dir)}
             </span>
           </TooltipTrigger>

@@ -347,7 +347,7 @@ describe("FilesPanel attached directories", () => {
     );
   });
 
-  it("styles roots as section headers without repeating the root basename", () => {
+  it("always shows the bold title and non-bold root basename", () => {
     renderPanel({
       conversationId: "conv_multi_root_headers",
       flatView: true,
@@ -368,7 +368,10 @@ describe("FilesPanel attached directories", () => {
     const header = toggle.closest("div");
     expect(header).toHaveClass("rounded-lg", "border", "shadow-sm");
     expect(header?.querySelector(".lucide-folder")).toBeNull();
-    expect(within(toggle).getAllByText("shared")).toHaveLength(1);
+    const labels = within(toggle).getAllByText("shared");
+    expect(labels).toHaveLength(2);
+    expect(labels.some((label) => label.classList.contains("font-semibold"))).toBe(true);
+    expect(labels.some((label) => label.classList.contains("font-normal"))).toBe(true);
   });
 
   it("edits and persists a root nickname inline", async () => {
