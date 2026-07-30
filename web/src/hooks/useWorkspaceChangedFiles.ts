@@ -15,7 +15,7 @@
 // (e.g. cloud-only agents).
 
 import { useEffect, useRef } from "react";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSessionHostOnline, useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { authenticatedFetch } from "@/lib/identity";
 import { useChatStore } from "@/store/chatStore";
@@ -785,7 +785,7 @@ interface WorkspaceEnvironmentsResponse {
 
 async function fetchWorkspaceEnvironments(conversationId: string): Promise<WorkspaceEnvironment[]> {
   const res = await authenticatedFetch(
-    `/v1/sessions/${encodeURIComponent(conversationId)}/resources/environments`,
+    `/v1/sessions/${encodeURIComponent(conversationId)}/resources/environments?order=asc&limit=1000`,
   );
   if (res.status === 404) return [];
   if (res.status === 503 && (await isRunnerUnavailable503(res))) {
@@ -801,7 +801,12 @@ async function fetchWorkspaceEnvironments(conversationId: string): Promise<Works
       available: true,
       root: resource.metadata?.root ?? null,
       home: resource.metadata?.home ?? null,
-    }));
+    }))
+    .sort((left, right) => {
+      if (left.id === DEFAULT_ENVIRONMENT_ID) return -1;
+      if (right.id === DEFAULT_ENVIRONMENT_ID) return 1;
+      return 0;
+    });
 }
 
 /** List every attached filesystem root in stable session order. */
@@ -817,6 +822,61 @@ export function useWorkspaceEnvironments(
     retry: shouldRetryRunnerOffline,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 60_000,
+  });
+}
+
+interface RenameWorkspaceEnvironmentInput {
+  environmentId: string;
+  /** A trimmed nickname, or null to restore the environment's default label. */
+  name: string | null;
+}
+
+async function renameWorkspaceEnvironment(
+  conversationId: string,
+  input: RenameWorkspaceEnvironmentInput,
+): Promise<{ environmentId: string; name: string }> {
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(conversationId)}/resources/environments/${encodeURIComponent(input.environmentId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: input.name }),
+    },
+  );
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string; error?: { message?: string } };
+      message = body.error?.message ?? body.detail ?? message;
+    } catch {
+      // Keep the status line for non-JSON proxy errors.
+    }
+    throw new Error(message);
+  }
+  const resource = (await res.json()) as { id: string; name: string };
+  return { environmentId: resource.id, name: resource.name };
+}
+
+/** Persist an attached environment nickname and update the root list immediately. */
+export function useRenameWorkspaceEnvironment(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: RenameWorkspaceEnvironmentInput) =>
+      renameWorkspaceEnvironment(conversationId!, input),
+    onSuccess: (renamed) => {
+      queryClient.setQueryData<WorkspaceEnvironment[]>(
+        ["workspace-environments", conversationId],
+        (current) =>
+          current?.map((environment) =>
+            environment.id === renamed.environmentId
+              ? { ...environment, name: renamed.name }
+              : environment,
+          ),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: ["workspace-environments", conversationId],
+      });
+    },
   });
 }
 

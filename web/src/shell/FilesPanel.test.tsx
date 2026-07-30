@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -7,6 +7,7 @@ import {
   type WorkspaceChangedFile,
   type WorkspaceFile,
   useAllWorkspaceChangedFiles,
+  useRenameWorkspaceEnvironment,
   useWorkspaceAllFilesForEnvironment,
   useWorkspaceDirectory,
   useWorkspaceEnvironment,
@@ -19,6 +20,7 @@ import { SCROLL_RESTORE_BUDGET_MS } from "./useScrollRestore";
 
 vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
   useAllWorkspaceChangedFiles: vi.fn(),
+  useRenameWorkspaceEnvironment: vi.fn(),
   useWorkspaceAllFilesForEnvironment: vi.fn(),
   useWorkspaceDirectory: vi.fn(),
   useWorkspaceEnvironment: vi.fn(),
@@ -30,6 +32,7 @@ vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
 
 const useAllFilesMock = vi.mocked(useWorkspaceAllFilesForEnvironment);
 const useChangedFilesMock = vi.mocked(useAllWorkspaceChangedFiles);
+const useRenameEnvironmentMock = vi.mocked(useRenameWorkspaceEnvironment);
 const useDirectoryMock = vi.mocked(useWorkspaceDirectory);
 const useEnvironmentMock = vi.mocked(useWorkspaceEnvironment);
 const useSearchMock = vi.mocked(useWorkspaceFileSearch);
@@ -91,7 +94,7 @@ function changedFilesResult(
     environments: environments ?? [
       {
         id: "default",
-        name: root ? (root.split(/[/\\]/).filter(Boolean).pop() ?? root) : "Primary environment",
+        name: root ? (root.split(/[/\\]/).filter(Boolean).pop() ?? root) : "Working folder",
         available: true,
         root,
         home: null,
@@ -191,6 +194,9 @@ beforeEach(() => {
   useDirectoryMock.mockReset();
   useEnvironmentMock.mockReset();
   useSearchMock.mockReset();
+  useRenameEnvironmentMock.mockReturnValue({
+    mutateAsync: vi.fn().mockResolvedValue(undefined),
+  } as unknown as ReturnType<typeof useRenameWorkspaceEnvironment>);
 });
 
 afterEach(() => {
@@ -216,7 +222,7 @@ describe("FilesPanel working folder directory", () => {
       environments: [
         {
           id: "default",
-          name: "Primary environment",
+          name: "Working folder",
           available: true,
           root: "/home/user/my-project",
           home: null,
@@ -358,10 +364,78 @@ describe("FilesPanel attached directories", () => {
       changedFiles: [],
     });
 
-    const header = screen.getByRole("button", { name: "Collapse shared folder" });
-    expect(header).toHaveClass("rounded-md", "border", "bg-muted/30");
-    expect(header.querySelector(".lucide-folder")).not.toBeNull();
-    expect(within(header).getAllByText("shared")).toHaveLength(1);
+    const toggle = screen.getByRole("button", { name: "Collapse shared folder" });
+    const header = toggle.closest("div");
+    expect(header).toHaveClass("rounded-lg", "border", "shadow-sm");
+    expect(header?.querySelector(".lucide-folder")).toBeNull();
+    expect(within(toggle).getAllByText("shared")).toHaveLength(1);
+  });
+
+  it("edits and persists a root nickname inline", async () => {
+    const mutateAsync = vi.fn().mockResolvedValue({ name: "Shared services" });
+    useRenameEnvironmentMock.mockReturnValue({
+      mutateAsync,
+    } as unknown as ReturnType<typeof useRenameWorkspaceEnvironment>);
+    renderPanel({
+      conversationId: "conv_rename_root",
+      flatView: true,
+      files: [],
+      environments: [
+        {
+          id: "dir_shared",
+          name: "shared",
+          available: true,
+          root: "/repo/shared",
+          home: null,
+        },
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename shared folder" }));
+    const input = screen.getByRole("textbox", { name: "Name for shared folder" });
+    fireEvent.change(input, { target: { value: "  Shared services  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name for shared folder" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        environmentId: "dir_shared",
+        name: "Shared services",
+      }),
+    );
+  });
+
+  it("clears a root nickname when the edited value is empty", async () => {
+    const mutateAsync = vi.fn().mockResolvedValue({ name: "shared" });
+    useRenameEnvironmentMock.mockReturnValue({
+      mutateAsync,
+    } as unknown as ReturnType<typeof useRenameWorkspaceEnvironment>);
+    renderPanel({
+      conversationId: "conv_clear_root_name",
+      flatView: true,
+      files: [],
+      environments: [
+        {
+          id: "dir_shared",
+          name: "Shared services",
+          available: true,
+          root: "/repo/shared",
+          home: null,
+        },
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Shared services folder" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name for Shared services folder" }), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save name for Shared services folder" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        environmentId: "dir_shared",
+        name: null,
+      }),
+    );
   });
 
   it("collapses each root independently in All view", () => {
@@ -1478,9 +1552,11 @@ describe("FilesPanel scroll position persistence", () => {
       isError: false,
       isLoading: false,
     };
-    useAllFilesMock.mockReturnValue(pending as unknown as ReturnType<typeof useWorkspaceAllFiles>);
+    useAllFilesMock.mockReturnValue(
+      pending as unknown as ReturnType<typeof useWorkspaceAllFilesForEnvironment>,
+    );
     useChangedFilesMock.mockReturnValue(
-      pending as unknown as ReturnType<typeof useWorkspaceChangedFiles>,
+      pending as unknown as ReturnType<typeof useAllWorkspaceChangedFiles>,
     );
     useDirectoryMock.mockReturnValue(directoryResult());
     useEnvironmentMock.mockReturnValue(environmentResult(null));

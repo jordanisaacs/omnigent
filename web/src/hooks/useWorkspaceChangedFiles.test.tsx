@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEffect } from "react";
 import type { ReactNode } from "react";
@@ -30,6 +30,7 @@ import {
   useWorkspaceEnvironments,
   useWorkspaceFileExists,
   useWorkspaceFileSearch,
+  useRenameWorkspaceEnvironment,
 } from "./useWorkspaceChangedFiles";
 
 const onlineMock = vi.mocked(useSessionRunnerOnline);
@@ -131,6 +132,18 @@ function EnvironmentsDataProbe({
     if (query.isSuccess) onData(query.data);
   }, [query.isSuccess, query.data, onData]);
   return null;
+}
+
+function RenameEnvironmentProbe({ id }: { id: string }) {
+  const rename = useRenameWorkspaceEnvironment(id);
+  return (
+    <button
+      type="button"
+      onClick={() => rename.mutate({ environmentId: "dir_shared", name: "Shared services" })}
+    >
+      Rename environment
+    </button>
+  );
 }
 
 function DisabledEnvironmentProbe({ id }: { id: string | undefined }) {
@@ -516,7 +529,7 @@ describe("useWorkspaceEnvironment gating", () => {
 });
 
 describe("useWorkspaceEnvironments", () => {
-  it("returns only environments explicitly marked as filesystem roots", async () => {
+  it("returns filesystem roots with the working folder first", async () => {
     onlineMock.mockReturnValue(true);
     fetchMock.mockResolvedValue(
       jsonResponse({
@@ -527,14 +540,14 @@ describe("useWorkspaceEnvironments", () => {
             metadata: { role: "terminal", root: "/workspace" },
           },
           {
-            id: "default",
-            name: "Primary environment",
-            metadata: { filesystem: true, role: "primary", root: "/workspace" },
-          },
-          {
             id: "dir_shared",
             name: "shared",
             metadata: { filesystem: true, role: "project", root: "/shared" },
+          },
+          {
+            id: "default",
+            name: "Working folder",
+            metadata: { filesystem: true, role: "primary", root: "/workspace" },
           },
         ],
       }),
@@ -553,6 +566,32 @@ describe("useWorkspaceEnvironments", () => {
         "dir_shared",
       ]),
     );
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/v1/sessions/conv_multi/resources/environments?order=asc&limit=1000",
+    );
+  });
+
+  it("persists an environment nickname through the PATCH endpoint", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: "dir_shared", name: "Shared services" }));
+
+    render(
+      <Wrap>
+        <RenameEnvironmentProbe id="conv_multi" />
+      </Wrap>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Rename environment" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/v1/sessions/conv_multi/resources/environments/dir_shared",
+    );
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init).toMatchObject({
+      method: "PATCH",
+      cache: "no-store",
+      body: JSON.stringify({ name: "Shared services" }),
+    });
+    expect(new Headers(init.headers).get("content-type")).toBe("application/json");
   });
 });
 

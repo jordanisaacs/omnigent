@@ -1,25 +1,27 @@
 import {
   ArrowDownAZIcon,
   ArrowDownWideNarrowIcon,
+  CheckIcon,
   ChevronRightIcon,
   EyeIcon,
   EyeOffIcon,
   FileClockIcon,
   FileTypeIcon,
-  FolderIcon,
   FolderTreeIcon,
   ListIcon,
   MoonIcon,
+  PencilIcon,
   SearchIcon,
   SlidersHorizontalIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useParams } from "@/lib/routing";
 import { useSessionHostOnline, useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { useChatStore } from "@/store/chatStore";
 import {
   useAllWorkspaceChangedFiles,
+  useRenameWorkspaceEnvironment,
   useWorkspaceAllFilesForEnvironment,
   type WorkspaceChangedFile,
   type WorkspaceEnvironment,
@@ -320,7 +322,8 @@ export function FilesPanel({
   const changedQuery = useAllWorkspaceChangedFiles(conversationId, {
     enabled: true,
   });
-  const environments = changedQuery.environments;
+  const renameEnvironment = useRenameWorkspaceEnvironment(conversationId);
+  const environments = changedQuery.environments ?? [];
   const changedFiles = changedQuery.data?.data ?? [];
   const changedCount = changedFiles.length;
   const hiddenFilesCount = changedFiles.filter((f) =>
@@ -373,7 +376,9 @@ export function FilesPanel({
   const scrollKey = conversationId
     ? `files:${conversationId}:${flatView ? "changed" : "all"}`
     : null;
-  const dataReady = flatView ? changedQuery.data !== undefined : allFilesQuery.data !== undefined;
+  // The aggregate environment query is the shared readiness gate for both
+  // views; each root owns its own lazy all-files query in `RootFolderTree`.
+  const dataReady = changedQuery.data !== undefined;
   const handleScroll = useScrollRestore(scrollRef, scrollKey, dataReady);
 
   return (
@@ -537,6 +542,9 @@ export function FilesPanel({
                       environment={environment}
                       collapsed={collapsed}
                       onToggle={() => toggleEnvironment(environment.id)}
+                      onRename={(name) =>
+                        renameEnvironment.mutateAsync({ environmentId: environment.id, name })
+                      }
                     />
                   )}
                   {!collapsed && (
@@ -581,6 +589,9 @@ export function FilesPanel({
                 exclude={debouncedTreeExclude}
                 collapsed={collapsedEnvironmentIds.has(environment.id)}
                 onToggle={() => toggleEnvironment(environment.id)}
+                onRename={(name) =>
+                  renameEnvironment.mutateAsync({ environmentId: environment.id, name })
+                }
               />
             ))}
           </div>
@@ -598,34 +609,116 @@ function DirectoryGroupHeader({
   environment,
   collapsed,
   onToggle,
+  onRename,
 }: {
   environment: WorkspaceEnvironment;
   collapsed: boolean;
   onToggle: () => void;
+  onRename: (name: string | null) => Promise<unknown>;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(environment.name);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(environment.name);
+  }, [editing, environment.name]);
+
+  function cancelEditing() {
+    setEditing(false);
+    setDraft(environment.name);
+    setSaveError(null);
+  }
+
+  async function saveName(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = draft.trim() || null;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onRename(name);
+      setEditing(false);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Could not rename folder");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <button
-      type="button"
-      aria-controls={environmentContentId(environment.id)}
-      aria-expanded={!collapsed}
-      aria-label={`${collapsed ? "Expand" : "Collapse"} ${environment.name} folder`}
-      className="group mb-1 flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md border border-border bg-muted/30 px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/40"
-      onClick={onToggle}
-    >
-      <ChevronRightIcon
-        className={cn(
-          "size-3.5 shrink-0 text-muted-foreground transition-transform",
-          !collapsed && "rotate-90",
-        )}
-      />
-      <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 truncate font-medium text-foreground text-xs">
-        {environment.name}
-      </span>
-      {environment.root && dirBasename(environment.root) !== environment.name && (
-        <WorkingDirLabel dir={environment.root} />
+    <div className="group mb-1 flex min-h-8 w-full min-w-0 items-center rounded-lg border border-border/80 bg-muted/25 px-1 py-1 shadow-sm transition-colors hover:bg-muted/40">
+      {editing ? (
+        <form className="flex min-w-0 flex-1 items-center gap-1" onSubmit={saveName}>
+          <input
+            autoFocus
+            aria-label={`Name for ${environment.name} folder`}
+            className="min-w-0 flex-1 rounded-md border border-border-strong bg-background px-2 py-0.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            disabled={saving}
+            maxLength={80}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") cancelEditing();
+            }}
+            title={saveError ?? undefined}
+            value={draft}
+          />
+          <button
+            type="submit"
+            aria-label={`Save name for ${environment.name} folder`}
+            className="cursor-pointer rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-default disabled:opacity-50"
+            disabled={saving}
+          >
+            <CheckIcon className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label={`Cancel renaming ${environment.name} folder`}
+            className="cursor-pointer rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-default disabled:opacity-50"
+            disabled={saving}
+            onClick={cancelEditing}
+          >
+            <XIcon className="size-3.5" />
+          </button>
+        </form>
+      ) : (
+        <>
+          <button
+            type="button"
+            aria-controls={environmentContentId(environment.id)}
+            aria-expanded={!collapsed}
+            aria-label={`${collapsed ? "Expand" : "Collapse"} ${environment.name} folder`}
+            className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            onClick={onToggle}
+          >
+            <ChevronRightIcon
+              className={cn(
+                "size-3.5 shrink-0 text-muted-foreground transition-transform",
+                !collapsed && "rotate-90",
+              )}
+            />
+            <span className="min-w-0 truncate font-semibold text-foreground text-xs tracking-tight">
+              {environment.name}
+            </span>
+            {environment.root && dirBasename(environment.root) !== environment.name && (
+              <WorkingDirLabel dir={environment.root} />
+            )}
+          </button>
+          <button
+            type="button"
+            aria-label={`Rename ${environment.name} folder`}
+            className="cursor-pointer rounded p-1 text-muted-foreground opacity-60 transition-opacity hover:bg-muted hover:text-foreground hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40"
+            onClick={() => {
+              setDraft(environment.name);
+              setSaveError(null);
+              setEditing(true);
+            }}
+          >
+            <PencilIcon className="size-3.5" />
+          </button>
+        </>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -643,6 +736,7 @@ function RootFolderTree({
   exclude,
   collapsed,
   onToggle,
+  onRename,
 }: {
   conversationId: string | undefined;
   environment: WorkspaceEnvironment;
@@ -657,6 +751,7 @@ function RootFolderTree({
   exclude: string;
   collapsed: boolean;
   onToggle: () => void;
+  onRename: (name: string | null) => Promise<unknown>;
 }) {
   const filesQuery = useWorkspaceAllFilesForEnvironment(conversationId, environment.id);
   const searchQueryResult = useWorkspaceFileSearch(conversationId, searchQuery, include, exclude, {
@@ -667,7 +762,12 @@ function RootFolderTree({
   });
   return (
     <div>
-      <DirectoryGroupHeader environment={environment} collapsed={collapsed} onToggle={onToggle} />
+      <DirectoryGroupHeader
+        environment={environment}
+        collapsed={collapsed}
+        onToggle={onToggle}
+        onRename={onRename}
+      />
       {!collapsed && (
         <div id={environmentContentId(environment.id)}>
           <FolderTree
