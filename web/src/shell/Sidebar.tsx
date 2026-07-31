@@ -149,6 +149,8 @@ import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useResizableSidebar } from "@/hooks/useResizableSidebar";
 import { useSessionSwitchHotkey } from "@/hooks/useSessionSwitchHotkey";
 import { usePinnedSessionHotkeys } from "@/hooks/usePinnedSessionHotkeys";
+import { usePmProjectSessions, usePmProjects } from "@/hooks/usePmIntegration";
+import type { PmProject } from "@/lib/pmIntegrationApi";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
 import { NewProjectButton } from "./NewProjectButton";
 import { SettingsSidebarBody, useSettingsRoute, useTrackSettingsReturn } from "./settingsNav";
@@ -159,6 +161,7 @@ import {
   computeNextActiveOverride,
   conversationDisplayLabel,
   dedupeConversationsById,
+  EXPANDED_PM_PROJECT_SECTIONS_STORAGE_KEY,
   EXPANDED_PROJECT_SECTIONS_STORAGE_KEY,
   orderByPinnedTimestamp,
   readPinnedConversationIds,
@@ -1087,6 +1090,145 @@ function ProjectFolder({
   );
 }
 
+/**
+ * One read-only PM project folder. Its membership is the exact live placement
+ * `(host_id, workspace)` and is fetched independently of the global sidebar
+ * window. Unlike native projects it is not a drop target and exposes no
+ * rename/delete/membership controls; the only project-level action starts a
+ * session with the live PM topology pre-filled.
+ */
+function PmProjectFolder({
+  project,
+  expanded,
+  marker,
+  onToggleCollapsed,
+  pinnedConversationIds,
+  activeOverride,
+  frozenSortKeys,
+  scrollRoot,
+  onRowClick,
+  onTogglePinned,
+  selectionMode,
+  selectedIds,
+  onToggleSelected,
+  onProjectAssigned,
+  renderedIdsRef,
+  viewerId,
+}: {
+  project: PmProject;
+  expanded: boolean;
+  marker: SessionState | null;
+  onToggleCollapsed: () => void;
+  pinnedConversationIds: string[];
+  activeOverride: ActiveChatOverride | null;
+  frozenSortKeys: Map<string, number> | null;
+  scrollRoot: RefObject<HTMLElement | null>;
+  onRowClick: (e: MouseEvent<HTMLAnchorElement>) => void;
+  onTogglePinned: (conversationId: string) => void;
+  selectionMode: boolean;
+  selectedIds: Set<string>;
+  onToggleSelected: (conversationId: string, shiftKey?: boolean) => void;
+  onProjectAssigned?: (projectName: string) => void;
+  renderedIdsRef: RefObject<Map<string, string[]>>;
+  viewerId: string | null;
+}) {
+  const query = usePmProjectSessions(project, expanded);
+  const pinnedSet = useMemo(() => new Set(pinnedConversationIds), [pinnedConversationIds]);
+  const conversations = useMemo(
+    () =>
+      sortByUpdatedAtDesc(
+        (query.data?.pages.flatMap((page) => page.data) ?? []).filter(
+          (conversation) =>
+            isOwnedByViewer(conversation, viewerId) && !pinnedSet.has(conversation.id),
+        ),
+        activeOverride,
+        frozenSortKeys,
+      ),
+    [query.data, pinnedSet, activeOverride, frozenSortKeys, viewerId],
+  );
+  renderedIdsRef.current.set(
+    project.id,
+    expanded ? conversations.map((conversation) => conversation.id) : [],
+  );
+
+  const loadingFirstPage = expanded && query.isLoading;
+  return (
+    <div data-testid="pm-project-folder" data-pm-project-id={project.id}>
+      <ConversationSection
+        title={project.name}
+        icon={
+          expanded ? (
+            <FolderOpenIcon className="size-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+          )
+        }
+        marker={marker}
+        conversations={conversations}
+        pinnedConversationIds={pinnedConversationIds}
+        collapsed={!expanded}
+        onToggleCollapsed={onToggleCollapsed}
+        onRowClick={onRowClick}
+        onTogglePinned={onTogglePinned}
+        selectionMode={selectionMode}
+        selectedIds={selectedIds}
+        onToggleSelected={onToggleSelected}
+        onProjectAssigned={onProjectAssigned}
+        emptyMessage={loadingFirstPage ? undefined : "No sessions"}
+        indentRows
+        headerAction={<PmProjectFolderAction project={project} onNavigate={onRowClick} />}
+        footer={
+          loadingFirstPage ? (
+            <p className="px-2 py-1 pl-5 text-muted-foreground text-xs">Loading…</p>
+          ) : (
+            <InfiniteScrollSentinel
+              hasMore={query.hasNextPage}
+              isFetching={query.isFetchingNextPage}
+              fetchMore={query.fetchNextPage}
+              scrollRoot={scrollRoot}
+              indent
+            />
+          )
+        }
+      />
+    </div>
+  );
+}
+
+function PmProjectFolderAction({
+  project,
+  onNavigate,
+}: {
+  project: PmProject;
+  onNavigate: (e: MouseEvent<HTMLAnchorElement>) => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          asChild
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={`New session in PM project ${project.name}`}
+          data-testid="pm-project-new-session"
+        >
+          <Link
+            to={`/?pm_project=${encodeURIComponent(project.id)}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onNavigate(event);
+            }}
+          >
+            <SquarePenIcon className="size-3.5" />
+          </Link>
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">New session in PM project</TooltipContent>
+    </Tooltip>
+  );
+}
+
 interface ConversationListProps {
   conversationsQuery: ReturnType<typeof useConversations>;
   // The scrollable ancestor, used as the infinite-scroll observer root.
@@ -1188,6 +1330,10 @@ function ConversationList({
   // Project folders ({ id, name }) for grouping sessions — first-class id
   // and/or the legacy omni_project label, unioned server-side.
   const { data: projects = [] } = useProjects();
+  // PM projects are live host views. They are intentionally separate from the
+  // persisted project list above and never participate in native membership
+  // mutations.
+  const { data: pmProjects = [] } = usePmProjects();
 
   // id → name for the rows' project_id lookup, built once here and shared via
   // context so a row doesn't subscribe to useProjects() itself.
@@ -1203,6 +1349,7 @@ function ConversationList({
   // (synchronously during render) so shift-select ranges use the real rendered
   // order, not the global paginated list which can diverge.
   const projectRenderedIdsRef = useRef<Map<string, string[]>>(new Map());
+  const pmProjectRenderedIdsRef = useRef<Map<string, string[]>>(new Map());
 
   // Freeze the active chat's sort key while you're inside it so an
   // updated_at bump from sending a message doesn't reorder the row
@@ -1301,7 +1448,30 @@ function ConversationList({
     // unloaded page. We render it as a folder with a "No sessions" placeholder
     // rather than hiding it (matches the target sidebar layout).
 
-    // Sessions: the remainder of the tab's slice — not pinned, not filed.
+    // PM membership is a live exact placement match, never a stored project
+    // id/label. A matching row leaves the flat Sessions section and appears in
+    // its PM folder. Keep the best-effort globally-loaded rows solely for the
+    // collapsed folder marker; an expanded folder fetches its full list with
+    // the same exact host/workspace filter.
+    const pmGroups =
+      activeTab === "shared"
+        ? []
+        : pmProjects.map((project) => {
+            const inProject = tabScoped.filter(
+              (conversation) =>
+                conversation.host_id === project.host_id &&
+                conversation.workspace === project.workspace &&
+                !pinnedIdSet.has(conversation.id),
+            );
+            inProject.forEach((conversation) => filedIds.add(conversation.id));
+            return {
+              project,
+              conversations: sortByUpdatedAtDesc(inProject, activeOverride, frozenKeys),
+            };
+          });
+
+    // Sessions: the remainder of the tab's slice — not pinned, not filed into
+    // a native project, and not rooted at a live PM project.
     const sessions = sortByUpdatedAtDesc(
       tabScoped.filter((c) => !pinnedIdSet.has(c.id) && !filedIds.has(c.id)),
       activeOverride,
@@ -1312,7 +1482,7 @@ function ConversationList({
       activeOverride,
       frozenKeys,
     );
-    return { pinned, sessions, archived, projectGroups };
+    return { pinned, sessions, archived, projectGroups, pmGroups };
   }, [
     allConversations,
     pinnedConversations,
@@ -1320,6 +1490,7 @@ function ConversationList({
     activeOverride,
     frozenKeys,
     projects,
+    pmProjects,
     activeTab,
     viewerId,
   ]);
@@ -1388,6 +1559,9 @@ function ConversationList({
   // user has expanded — persisted across reloads. A project shows its rows only
   // while its name is in this set.
   const [expandedProjects, setExpandedProjects] = useState<string[]>(readExpandedProjectSections);
+  const [expandedPmProjects, setExpandedPmProjects] = useState<string[]>(
+    readExpandedPmProjectSections,
+  );
   // True only while the open set was produced by "Expand all" and hasn't been
   // touched since. This — not "do all folders happen to be open" — is what gates
   // the revert affordance, so a user who opens every folder by hand (forced with
@@ -1413,6 +1587,23 @@ function ConversationList({
       setExpandedViaButton(false);
       const next = [...prev, projectName];
       writeExpandedProjectSections(next);
+      return next;
+    });
+  }, []);
+  const togglePmProjectExpanded = useCallback((projectId: string) => {
+    setExpandedPmProjects((previous) => {
+      const next = previous.includes(projectId)
+        ? previous.filter((id) => id !== projectId)
+        : [...previous, projectId];
+      writeExpandedPmProjectSections(next);
+      return next;
+    });
+  }, []);
+  const expandPmProject = useCallback((projectId: string) => {
+    setExpandedPmProjects((previous) => {
+      if (previous.includes(projectId)) return previous;
+      const next = [...previous, projectId];
+      writeExpandedPmProjectSections(next);
       return next;
     });
   }, []);
@@ -1534,6 +1725,21 @@ function ConversationList({
     expandProject(activeProjectName);
   }, [activeId, activeProjectName, pinnedSet, expandProject]);
 
+  const activePmProjectId = useMemo(() => {
+    if (!activeId) return null;
+    const active = allConversations.find((conversation) => conversation.id === activeId);
+    if (!active) return null;
+    return (
+      pmProjects.find(
+        (project) => project.host_id === active.host_id && project.workspace === active.workspace,
+      )?.id ?? null
+    );
+  }, [activeId, allConversations, pmProjects]);
+  useEffect(() => {
+    if (!activeId || !activePmProjectId || pinnedSet.has(activeId)) return;
+    expandPmProject(activePmProjectId);
+  }, [activeId, activePmProjectId, pinnedSet, expandPmProject]);
+
   // Visible rows in render order (collapsed sections excluded) for the Cmd+↑/↓
   // session hotkey. Titles must match the <ConversationSection> props below.
   const orderedConversationIds = useMemo(() => {
@@ -1543,6 +1749,7 @@ function ConversationList({
     // expanded AND that individual project folder is expanded (folders are
     // collapsed unless explicitly opened — inverse of the fixed sections).
     const projectsCollapsed = effectiveCollapsedSections.includes("Projects");
+    const pmCollapsed = effectiveCollapsedSections.includes("PM");
     const projectVisible = (name: string, list: readonly Conversation[]) =>
       !projectsCollapsed && expandedProjects.includes(name) ? list : [];
     // `sections` is already scoped to the active tab, so the same Pinned /
@@ -1550,9 +1757,12 @@ function ConversationList({
     return [
       ...visible("Pinned", sections.pinned),
       ...sections.projectGroups.flatMap((g) => projectVisible(g.name, g.conversations)),
+      ...sections.pmGroups.flatMap((group) =>
+        !pmCollapsed && expandedPmProjects.includes(group.project.id) ? group.conversations : [],
+      ),
       ...visible("Chats", sections.sessions),
     ].map((c) => c.id);
-  }, [sections, effectiveCollapsedSections, expandedProjects]);
+  }, [sections, effectiveCollapsedSections, expandedProjects, expandedPmProjects]);
   useEffect(() => {
     onVisibleCountChange(orderedConversationIds.length);
   }, [orderedConversationIds.length, onVisibleCountChange]);
@@ -1560,11 +1770,17 @@ function ConversationList({
     const visible = (title: string, list: readonly Conversation[]) =>
       effectiveCollapsedSections.includes(title) ? [] : [...list];
     const projectsCollapsed = effectiveCollapsedSections.includes("Projects");
+    const pmCollapsed = effectiveCollapsedSections.includes("PM");
     const projectVisible = (name: string, list: readonly Conversation[]) =>
       !projectsCollapsed && expandedProjects.includes(name) ? [...list] : [];
     return [
       ...visible("Pinned", sections.pinned),
       ...sections.projectGroups.flatMap((g) => projectVisible(g.name, g.conversations)),
+      ...sections.pmGroups.flatMap((group) =>
+        !pmCollapsed && expandedPmProjects.includes(group.project.id)
+          ? [...group.conversations]
+          : [],
+      ),
       ...visible("Chats", sections.sessions),
     ];
   };
@@ -1577,11 +1793,17 @@ function ConversationList({
     const vis = (title: string, list: readonly Conversation[]) =>
       effectiveCollapsedSections.includes(title) ? [] : list.map((c) => c.id);
     const projCollapsed = effectiveCollapsedSections.includes("Projects");
+    const pmCollapsed = effectiveCollapsedSections.includes("PM");
     return [
       ...vis("Pinned", sections.pinned),
       ...(projCollapsed
         ? []
         : sections.projectGroups.flatMap((g) => projectRenderedIdsRef.current.get(g.name) ?? [])),
+      ...(pmCollapsed
+        ? []
+        : sections.pmGroups.flatMap(
+            (group) => pmProjectRenderedIdsRef.current.get(group.project.id) ?? [],
+          )),
       ...vis("Chats", sections.sessions),
     ];
   };
@@ -1630,7 +1852,9 @@ function ConversationList({
     sections.pinned.length +
     sections.sessions.length +
     sections.projectGroups.length +
-    sections.projectGroups.reduce((sum, g) => sum + g.conversations.length, 0);
+    sections.projectGroups.reduce((sum, g) => sum + g.conversations.length, 0) +
+    sections.pmGroups.length +
+    sections.pmGroups.reduce((sum, group) => sum + group.conversations.length, 0);
 
   // Section structure comes from the muted micro-headers + whitespace
   // alone (Linear-style) — no icons or counts in the headers, no divider
@@ -1756,6 +1980,37 @@ function ConversationList({
                         </p>
                       )}
                   </SectionGroup>
+                )}
+                {activeTab !== "shared" && sections.pmGroups.length > 0 && (
+                  <div data-testid="pm-project-section">
+                    <SectionGroup
+                      title="PM"
+                      collapsed={effectiveCollapsedSections.includes("PM")}
+                      onToggleCollapsed={() => effectiveToggleSectionCollapsed("PM")}
+                    >
+                      {sections.pmGroups.map(({ project, conversations }) => (
+                        <PmProjectFolder
+                          key={project.id}
+                          project={project}
+                          expanded={expandedPmProjects.includes(project.id)}
+                          marker={projectMarkerState(conversations)}
+                          onToggleCollapsed={() => togglePmProjectExpanded(project.id)}
+                          pinnedConversationIds={pinnedConversationIds}
+                          activeOverride={activeOverride}
+                          frozenSortKeys={frozenKeys}
+                          scrollRoot={scrollContainerRef}
+                          onRowClick={onRowClick}
+                          onTogglePinned={onTogglePinned}
+                          selectionMode={selectionMode}
+                          selectedIds={selectedIds}
+                          onToggleSelected={onToggleSelected}
+                          onProjectAssigned={expandProject}
+                          renderedIdsRef={pmProjectRenderedIdsRef}
+                          viewerId={viewerId}
+                        />
+                      ))}
+                    </SectionGroup>
+                  </div>
                 )}
                 {sections.sessions.length > 0 && (
                   // Drop a session here to send it to the flat "Chats" list — where
@@ -4269,5 +4524,27 @@ function writeExpandedProjectSections(names: string[]) {
     window.localStorage.setItem(EXPANDED_PROJECT_SECTIONS_STORAGE_KEY, JSON.stringify(names));
   } catch {
     // Same as collapse state — a lost local preference is harmless.
+  }
+}
+
+function readExpandedPmProjectSections(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(EXPANDED_PM_PROJECT_SECTIONS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is string => typeof value === "string");
+  } catch {
+    return [];
+  }
+}
+
+function writeExpandedPmProjectSections(viewIds: string[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(EXPANDED_PM_PROJECT_SECTIONS_STORAGE_KEY, JSON.stringify(viewIds));
+  } catch {
+    // Live-view expansion is a local preference; losing it is harmless.
   }
 }

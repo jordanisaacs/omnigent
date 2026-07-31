@@ -26,6 +26,7 @@ const {
   conversationsRef,
   pinnedIdsRef,
   projectSessionsMock,
+  pmProjectsMock,
   useHostsMock,
 } = vi.hoisted(() => ({
   projectsMock: [] as string[],
@@ -50,11 +51,51 @@ const {
   // serves exactly those rows instead of deriving from the global list — used to
   // prove a folder fetches its members independently of the global window.
   projectSessionsMock: { current: {} as Record<string, unknown[]> },
+  pmProjectsMock: {
+    current: [] as Array<{
+      id: string;
+      object: "pm.project";
+      name: string;
+      host_id: string;
+      host_name: string;
+      path: string;
+      workspace: string;
+      lease_count: number;
+      worktrees: [];
+      directories: [];
+    }>,
+  },
   useHostsMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: useHostsMock,
+}));
+
+vi.mock("@/hooks/usePmIntegration", () => ({
+  usePmProjects: () => ({ data: pmProjectsMock.current, isLoading: false }),
+  usePmProjectSessions: (project: { host_id: string; workspace: string }, enabled: boolean) => {
+    const rows = enabled
+      ? conversationsRef.current.filter(
+          (conversation) =>
+            (conversation as any).host_id === project.host_id &&
+            (conversation as any).workspace === project.workspace &&
+            (conversation as any).archived !== true,
+        )
+      : [];
+    return {
+      data: enabled
+        ? {
+            pages: [{ data: rows, first_id: null, last_id: null, has_more: false }],
+            pageParams: [undefined],
+          }
+        : undefined,
+      isLoading: false,
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+    };
+  },
 }));
 
 // Mutation hooks are only invoked on row actions; stub them. useConversations
@@ -238,6 +279,7 @@ beforeEach(() => {
   fetchProjectSessionIdsMock.mockReset();
   fetchProjectSessionIdsMock.mockResolvedValue([]);
   projectSessionsMock.current = {};
+  pmProjectsMock.current = [];
   pinnedIdsRef.current = [];
   // Default to a multi-user server so the tab-based tests see the tabs.
   isServerLocalMock.mockReturnValue(false);
@@ -1264,6 +1306,70 @@ describe("Sidebar project sections", () => {
     const menuItem = await screen.findByTestId("project-new-session-menu");
     expect(menuItem).toHaveClass("md:hidden");
     expect(menuItem.closest("a")).toHaveAttribute("href", "/?project=Customer%20X");
+  });
+});
+
+describe("Sidebar PM project section", () => {
+  it("renders live and empty PM folders between Projects and Sessions with exact membership", () => {
+    pmProjectsMock.current = [
+      {
+        id: "view_demo",
+        object: "pm.project",
+        name: "PM demo",
+        host_id: "host_pm",
+        host_name: "Laptop",
+        path: "/home/alice/.projects/demo",
+        workspace: "/home/alice/.projects/demo",
+        lease_count: 1,
+        worktrees: [],
+        directories: [],
+      },
+      {
+        id: "view_empty",
+        object: "pm.project",
+        name: "PM empty",
+        host_id: "host_pm",
+        host_name: "Laptop",
+        path: "/home/alice/.projects/empty",
+        workspace: "/home/alice/.projects/empty",
+        lease_count: 0,
+        worktrees: [],
+        directories: [],
+      },
+    ];
+    mockConversations([
+      conv("pm_session", "Claude Code", {
+        host_id: "host_pm",
+        workspace: "/home/alice/.projects/demo",
+      }),
+      conv("ordinary_session", "Codex", {
+        host_id: "host_pm",
+        workspace: "/home/alice/repos/other",
+      }),
+    ]);
+    renderSidebar();
+
+    const projectsHeader = screen.getByRole("button", { name: "Projects" });
+    const pmHeader = screen.getByRole("button", { name: "PM" });
+    const sessionsHeader = screen.getByRole("button", { name: "Sessions" });
+    expect(projectsHeader.compareDocumentPosition(pmHeader)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(pmHeader.compareDocumentPosition(sessionsHeader)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    const pmSection = screen.getByTestId("pm-project-section");
+    expect(within(pmSection).getByRole("button", { name: "PM demo" })).toBeInTheDocument();
+    expect(within(pmSection).getByRole("button", { name: "PM empty" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /ordinary_session/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /pm_session/ })).toBeNull();
+
+    // Each PM folder controls only its own lazy exact-placement query.
+    fireEvent.click(within(pmSection).getByRole("button", { name: "PM demo" }));
+    expect(within(pmSection).getByRole("link", { name: /pm_session/ })).toBeInTheDocument();
+    expect(within(pmSection).queryByText("No sessions")).toBeNull();
+
+    const newSession = within(pmSection).getByRole("link", {
+      name: "New session in PM project PM demo",
+    });
+    expect(newSession).toHaveAttribute("href", "/?pm_project=view_demo");
   });
 });
 

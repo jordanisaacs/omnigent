@@ -9,7 +9,9 @@ import { useHosts } from "@/hooks/useHosts";
 import type { AvailableAgent } from "@/hooks/useAvailableAgents";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import { useProjectConfig, useProjects } from "@/hooks/useConversations";
+import { usePmProject } from "@/hooks/usePmIntegration";
 import type { ProjectConfig } from "@/lib/projectsApi";
+import type { PmProject } from "@/lib/pmIntegrationApi";
 import { useHostWorktrees } from "@/hooks/useHostWorktrees";
 import type { HostWorktree } from "@/hooks/useHostWorktrees";
 import { NewChatLandingScreen } from "./NewChatDialog";
@@ -63,6 +65,11 @@ vi.mock("@/hooks/useConversations", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useConversations")>()),
   useProjects: vi.fn(),
   useProjectConfig: vi.fn(),
+}));
+vi.mock("@/hooks/usePmIntegration", () => ({
+  PM_PROJECTS_QUERY_KEY: ["pm-projects"],
+  PM_PROJECT_SESSIONS_QUERY_KEY: ["pm-project-sessions"],
+  usePmProject: vi.fn(),
 }));
 vi.mock("@/lib/agentLabels", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/agentLabels")>()),
@@ -159,6 +166,12 @@ beforeEach(() => {
   ]);
   // No stored config by default.
   setProjectConfig({});
+  vi.mocked(usePmProject).mockReturnValue({
+    data: undefined,
+    isLoading: false,
+    isError: false,
+    error: null,
+  } as ReturnType<typeof usePmProject>);
 });
 
 function setHostsAndAgents(): void {
@@ -174,6 +187,63 @@ afterEach(() => {
 });
 
 describe("NewChatLandingScreen project prefill", () => {
+  it("locks a PM project's live topology and submits no PM or native project metadata", async () => {
+    const PM_ROOT = "/home/corey/.projects/pm-demo";
+    const PM_PROJECT: PmProject = {
+      id: "view_pm",
+      object: "pm.project",
+      name: "pm-demo",
+      host_id: "host_pm",
+      host_name: "PM laptop",
+      path: PM_ROOT,
+      workspace: PM_ROOT,
+      lease_count: 0,
+      worktrees: [
+        {
+          name: "app",
+          repo: "app",
+          path: `${PM_ROOT}/app`,
+          status: "active",
+          included: true,
+        },
+      ],
+      directories: [{ name: "app", path: `${PM_ROOT}/app` }],
+    };
+    searchParams = new URLSearchParams("pm_project=view_pm");
+    vi.mocked(usePmProject).mockReturnValue({
+      data: PM_PROJECT,
+      isLoading: false,
+      isError: false,
+      error: null,
+    } as ReturnType<typeof usePmProject>);
+    vi.mocked(useHosts).mockReturnValue({
+      data: [host({ host_id: "host_pm", name: "PM laptop" })],
+    } as ReturnType<typeof useHosts>);
+
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain(
+        "pm-demo",
+      ),
+    );
+
+    expect(screen.getByRole("heading", { name: "pm-demo" })).toBeInTheDocument();
+    expect(screen.getByTestId("new-chat-landing-host-chip")).toBeDisabled();
+    expect(screen.getByTestId("new-chat-landing-workspace-chip")).toBeDisabled();
+    expect(screen.getAllByTestId("new-chat-landing-additional-directory")).toHaveLength(1);
+    expect(screen.queryByTestId("new-chat-landing-add-directory-chip")).toBeNull();
+    expect(screen.queryByTestId("new-chat-landing-branch-chip")).toBeNull();
+    expect(screen.queryByLabelText(`Remove attached folder ${PM_ROOT}/app`)).toBeNull();
+
+    const body = await submitAndReadBody();
+    expect(body.host_id).toBe("host_pm");
+    expect(body.workspace).toBe(PM_ROOT);
+    expect(body.directories).toEqual([{ path: `${PM_ROOT}/app` }]);
+    expect(body.git).toBeUndefined();
+    expect(body.project_id).toBeUndefined();
+    expect(body.pm_project).toBeUndefined();
+  });
+
   it("seeds host / workspace / directories / agent from the stored config", async () => {
     setProjectConfig({
       host_id: "host_1",

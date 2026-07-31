@@ -426,6 +426,17 @@ export function useRenameConversation() {
       );
       if (next !== data) queryClient.setQueryData(key, next);
     }
+    for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
+      queryKey: ["pm-project-sessions"],
+    })) {
+      const { data: next } = mergeItemsIntoPages(
+        data,
+        itemsById,
+        PROJECT_FOLDER_FILTERS,
+        undefined,
+      );
+      if (next !== data) queryClient.setQueryData(key, next);
+    }
     // The pinned-row backfill cache (staleTime 60s) and the per-session
     // snapshot (staleTime Infinity) are not covered by the list patch and
     // would serve the old title long after.
@@ -448,11 +459,12 @@ export function useRenameConversation() {
       await Promise.all([
         queryClient.cancelQueries({ queryKey: ["conversations"] }),
         queryClient.cancelQueries({ queryKey: ["project-sessions"] }),
+        queryClient.cancelQueries({ queryKey: ["pm-project-sessions"] }),
       ]);
       // Find the row's current title in whichever list cache holds it — the
       // flat sidebar list or a project folder — so a failed PATCH can revert.
       let listTitle: string | null | undefined;
-      for (const queryKey of [["conversations"], ["project-sessions"]]) {
+      for (const queryKey of [["conversations"], ["project-sessions"], ["pm-project-sessions"]]) {
         for (const [, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
           queryKey,
         })) {
@@ -519,6 +531,7 @@ export function useArchiveConversation() {
       // or drops it from that project folder's own paginated list.
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["pm-project-sessions"] });
       // Archive membership just changed, so the archived-view picker's option
       // set may have gained/lost a project.
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
@@ -577,7 +590,7 @@ export function useStopAndDeleteConversation() {
       // page shape. Patched in place rather than invalidated for the same
       // reason as the global list: an immediate refetch races the server's
       // async search reindex and can resurrect the just-deleted row.
-      for (const queryKey of [["conversations"], ["project-sessions"]]) {
+      for (const queryKey of [["conversations"], ["project-sessions"], ["pm-project-sessions"]]) {
         for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
           queryKey,
         })) {
@@ -599,6 +612,7 @@ export function useStopAndDeleteConversation() {
       // list, /v1/sessions/projects reads the DB directly (no search-index
       // lag), so this can't resurrect the deleted row.
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["pm-projects"] });
       // Deleting an archived session may empty its project of archived members.
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
@@ -626,6 +640,7 @@ export function useStopSession() {
     onSuccess: (_data, id) => {
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      void queryClient.invalidateQueries({ queryKey: ["pm-project-sessions"] });
     },
   });
 }
@@ -661,6 +676,7 @@ export function useBulkArchiveConversations() {
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["pm-project-sessions"] });
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
   });
@@ -701,7 +717,7 @@ export function useBulkDeleteConversations() {
       // Splice deleted rows out of the global list AND every project folder's
       // own paginated list (same page shape) so filed sessions leave their
       // folder without a refresh.
-      for (const queryKey of [["conversations"], ["project-sessions"]]) {
+      for (const queryKey of [["conversations"], ["project-sessions"], ["pm-project-sessions"]]) {
         for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
           queryKey,
         })) {
@@ -720,12 +736,13 @@ export function useBulkDeleteConversations() {
       // Refresh the project list so a project emptied by these deletes drops
       // its now-empty folder (DB-direct read, no search-index lag).
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["pm-projects"] });
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
     onError: (err: any) => {
       if (err?.succeeded) {
         const idSet = new Set(err.succeeded as string[]);
-        for (const queryKey of [["conversations"], ["project-sessions"]]) {
+        for (const queryKey of [["conversations"], ["project-sessions"], ["pm-project-sessions"]]) {
           for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
             queryKey,
           })) {
@@ -742,6 +759,7 @@ export function useBulkDeleteConversations() {
           old ? { ...old, conversations: old.conversations.filter((c) => !idSet.has(c.id)) } : old,
         );
         void queryClient.invalidateQueries({ queryKey: ["projects"] });
+        void queryClient.invalidateQueries({ queryKey: ["pm-projects"] });
         void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
       }
     },
@@ -940,6 +958,10 @@ export function useTogglePinnedConversation() {
     queryClient
       .getQueriesData<ConversationsInfiniteData>({ queryKey: ["project-sessions"] })
       .flatMap(([, data]) => data?.pages.flatMap((p) => p.data) ?? [])
+      .find((c) => c.id === id) ??
+    queryClient
+      .getQueriesData<ConversationsInfiniteData>({ queryKey: ["pm-project-sessions"] })
+      .flatMap(([, data]) => data?.pages.flatMap((p) => p.data) ?? [])
       .find((c) => c.id === id);
 
   // Apply a pin/unpin to every cache that renders the row. `labels` is the
@@ -961,6 +983,19 @@ export function useTogglePinnedConversation() {
         undefined,
       );
       if (next !== data) queryClient.setQueryData(key, next);
+    }
+    for (const queryKey of [["project-sessions"], ["pm-project-sessions"]]) {
+      for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
+        queryKey,
+      })) {
+        const { data: next } = mergeItemsIntoPages(
+          data,
+          itemsById,
+          PROJECT_FOLDER_FILTERS,
+          undefined,
+        );
+        if (next !== data) queryClient.setQueryData(key, next);
+      }
     }
     queryClient.setQueryData<Conversation | null>(["conversation-backfill", id], (old) =>
       old ? { ...old, labels } : old,
@@ -1215,6 +1250,7 @@ export function useMoveToProject() {
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       // Moving into/out of a project changes both folders' paginated lists.
       void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["pm-project-sessions"] });
       // Moving an archived session relabels which project owns it, shifting the
       // archived-view picker's option set.
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
@@ -1369,6 +1405,7 @@ export function useDeleteProject() {
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["pm-project-sessions"] });
       // Deleting a project archives its members, growing the archived set.
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
@@ -1450,6 +1487,7 @@ export function useRenameProject() {
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["pm-project-sessions"] });
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
   });

@@ -147,6 +147,11 @@ import { useNativeServerSwitcherForMainSurface } from "@/hooks/useNativeServerSw
 import type { WorkspaceFile } from "@/hooks/useWorkspaceChangedFiles";
 import type { Conversation } from "@/hooks/useConversations";
 import { useProjectConfig, useProjects, moveConversationToProject } from "@/hooks/useConversations";
+import {
+  PM_PROJECTS_QUERY_KEY,
+  PM_PROJECT_SESSIONS_QUERY_KEY,
+  usePmProject,
+} from "@/hooks/usePmIntegration";
 import { FileMentionMenu } from "@/components/FileMentionMenu";
 import { useMentionBrowser } from "@/hooks/useMentionBrowser";
 import {
@@ -1743,13 +1748,25 @@ export function NewChatLandingScreen() {
   // Project driving this visit, when the sidebar's per-project "new session"
   // pencil landed here with a `?project=` query param. Empty otherwise.
   const projectParam = searchParams.get("project") ?? "";
+  // PM project views are addressed separately from persisted Omnigent
+  // projects. The view id is used only to load live topology for this visit;
+  // it is never submitted with or attached to the new session.
+  const pmProjectParam = searchParams.get("pm_project") ?? "";
+  const prefillProject = pmProjectParam !== "" ? `pm:${pmProjectParam}` : projectParam;
+  const {
+    data: pmProject,
+    isLoading: pmProjectLoading,
+    isError: pmProjectError,
+    error: pmProjectLoadError,
+  } = usePmProject(pmProjectParam);
+  const pmProjectLocked = pmProjectParam !== "";
   // Seeded from the persisted last pick so a returning user starts on the
   // agent they used last; validated against the live list in
   // effectiveAgentId below (a stale id falls back to the default). A
   // project-driven visit defers to the project-prefill effect instead
   // (which falls back to the same last pick).
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(
-    () => landingDraft?.pickedAgentId ?? (projectParam !== "" ? null : readLastAgentId()),
+    () => landingDraft?.pickedAgentId ?? (prefillProject !== "" ? null : readLastAgentId()),
   );
   const [selectedHostId, setSelectedHostId] = useState<string | null>(
     () => landingDraft?.selectedHostId ?? null,
@@ -1827,13 +1844,15 @@ export function NewChatLandingScreen() {
   // conversation_labels row). Empty = unfiled. Applied right after create.
   // Pre-filled from the `?project=` param so the sidebar's per-project
   // "new session" pencil lands here with the project already selected.
-  const [selectedProject, setSelectedProject] = useState<string>(() => projectParam);
+  const [selectedProject, setSelectedProject] = useState<string>(() =>
+    pmProjectParam === "" ? projectParam : "",
+  );
   // The landing screen stays mounted while the `?project=` param changes (e.g.
   // clicking a different project's pencil), so the lazy initializer above won't
   // re-run — sync the selection to the param whenever it changes.
   useEffect(() => {
-    setSelectedProject(projectParam);
-  }, [projectParam]);
+    setSelectedProject(pmProjectParam === "" ? projectParam : "");
+  }, [projectParam, pmProjectParam]);
   // Permission mode for Claude Code (claude --permission-mode). Only
   // meaningful for the claude-native wrapper; ignored otherwise. Lives in
   // the footer tray's Advanced settings menu.
@@ -1983,10 +2002,10 @@ export function NewChatLandingScreen() {
   const { data: projectList, isLoading: projectListLoading } = useProjects();
   const configProjectId = useMemo(
     () =>
-      projectParam !== ""
+      projectParam !== "" && pmProjectParam === ""
         ? ((projectList ?? []).find((p) => p.name === projectParam)?.id ?? null)
         : null,
-    [projectList, projectParam],
+    [projectList, projectParam, pmProjectParam],
   );
   const { data: storedProjectConfig, isLoading: projectConfigLoading } =
     useProjectConfig(configProjectId);
@@ -1995,6 +2014,17 @@ export function NewChatLandingScreen() {
   // (plain visit / label-only folder / genuinely empty config), so it settles
   // immediately and the generic defaults take over.
   const prefillConfig = useMemo<ProjectPrefillConfig | undefined>(() => {
+    if (pmProjectParam !== "") {
+      if (pmProjectLoading) return undefined;
+      if (!pmProject) return {};
+      return {
+        hostId: pmProject.host_id,
+        workspace: pmProject.workspace,
+        directories: normalizeProjectDirectories(pmProject.directories, pmProject.workspace).map(
+          (directory) => directory.path,
+        ),
+      };
+    }
     // A project-scoped visit must resolve name → id via the projects list
     // before we know whether there's a config to read — until it loads, the id
     // is falsely null, so wait rather than settle prematurely.
@@ -2011,6 +2041,9 @@ export function NewChatLandingScreen() {
     };
   }, [
     projectParam,
+    pmProjectParam,
+    pmProjectLoading,
+    pmProject,
     projectListLoading,
     configProjectId,
     projectConfigLoading,
@@ -2021,7 +2054,7 @@ export function NewChatLandingScreen() {
   // host/workspace defaults below hold off until it settles so they can't win
   // the race against the project's stored values.
   const [prefill, setPrefill] = useState<ProjectPrefillState>(() =>
-    initialPrefillState(projectParam),
+    initialPrefillState(prefillProject),
   );
   // The generic defaults gate on the location track only — the agent seed
   // waits on its own fetch and must not hold up the host/workspace fill.
@@ -2038,17 +2071,17 @@ export function NewChatLandingScreen() {
   // every seedable slot and restart the machine. Values the user set are
   // reset too — a pencil click means "set me up for this project".
   useEffect(() => {
-    if (prefill.project === projectParam) return;
+    if (prefill.project === prefillProject) return;
     setSandboxSelected(false);
     setSelectedHostId(null);
-    setPickedAgentId(projectParam !== "" ? null : readLastAgentId());
+    setPickedAgentId(prefillProject !== "" ? null : readLastAgentId());
     setWorkspace("");
     setAdditionalDirectories([]);
     setBranchName("");
     seededHostRef.current = null;
     worktreeSeededForRef.current = null;
-    setPrefill(initialPrefillState(projectParam));
-  }, [projectParam, prefill.project]);
+    setPrefill(initialPrefillState(prefillProject));
+  }, [prefillProject, prefill.project]);
 
   // Auto-select an option so a session can be started without an explicit
   // pick. Prefer the user's last explicit choice (persisted across visits);
@@ -2457,7 +2490,7 @@ export function NewChatLandingScreen() {
   // unset. An opt-in worktree is generated by the dedicated effect below once
   // the workspace is in place.
   useEffect(() => {
-    if (prefill.project !== projectParam || prefillDone(prefill)) return;
+    if (prefill.project !== prefillProject || prefillDone(prefill)) return;
     const step = projectPrefillStep(prefill, {
       hosts,
       // The pickable list, not the raw one — a hidden agent's id would seed
@@ -2486,7 +2519,7 @@ export function NewChatLandingScreen() {
     setPrefill(step.state);
   }, [
     prefill,
-    projectParam,
+    prefillProject,
     hosts,
     agents,
     agentList,
@@ -2497,6 +2530,24 @@ export function NewChatLandingScreen() {
     prefillConfig,
   ]);
 
+  // A PM view is authoritative, not merely a default. Force the live placement
+  // into state when discovery resolves (overriding any preserved landing
+  // draft), and clear worktree intent because PM sessions always start at the
+  // project root with PM's active worktrees attached as additional roots.
+  useEffect(() => {
+    if (!pmProject) return;
+    setSandboxSelected(false);
+    setSelectedHostId(pmProject.host_id);
+    setWorkspace(pmProject.workspace);
+    setAdditionalDirectories(
+      normalizeProjectDirectories(pmProject.directories, pmProject.workspace).map(
+        (directory) => directory.path,
+      ),
+    );
+    setBranchName("");
+    setPrefilledBranch("");
+  }, [pmProject]);
+
   // Opt-in worktree from the project's stored config. The inference machine
   // settles a config-driven location without touching the branch, so this
   // effect creates the fresh worktree once the workspace is fully in place —
@@ -2506,7 +2557,7 @@ export function NewChatLandingScreen() {
   // typed branch / existing-worktree prefill is never clobbered.
   useEffect(() => {
     if (prefillConfig?.useWorktree !== true) return;
-    if (prefill.project !== projectParam || !prefillDone(prefill)) return;
+    if (prefill.project !== prefillProject || !prefillDone(prefill)) return;
     if (sandboxSelected || selectedHostId === null || workspaceTrimmed === "") return;
     if (branchName !== "" || prefilledBranch !== "") return;
     if (worktreeSeededForRef.current === workspaceTrimmed) return;
@@ -2518,7 +2569,7 @@ export function NewChatLandingScreen() {
   }, [
     prefillConfig,
     prefill,
-    projectParam,
+    prefillProject,
     sandboxSelected,
     selectedHostId,
     workspaceTrimmed,
@@ -2680,6 +2731,7 @@ export function NewChatLandingScreen() {
     message.trim().length > 0 &&
     selectedAgent != null &&
     (sandboxSelected ? sandboxRepoValid : !!selectedHostId && workspaceValid) &&
+    (!pmProjectLocked || (pmProject != null && !pmProjectLoading && !pmProjectError)) &&
     !creating;
 
   // Why submit is disabled, surfaced as the button's tooltip. Checked in the
@@ -2688,13 +2740,17 @@ export function NewChatLandingScreen() {
   // actionable (submitting, or mid-create).
   const submitDisabledReason = canSubmit
     ? null
-    : sandboxSelected && !sandboxRepoValid
-      ? "Please enter a valid repository URL"
-      : !sandboxSelected && (!selectedHostId || !workspaceValid)
-        ? "Please choose a host and working directory"
-        : message.trim().length === 0
-          ? "Enter a message to get started"
-          : null;
+    : pmProjectLoading
+      ? "Loading PM project"
+      : pmProjectError
+        ? "PM project is unavailable"
+        : sandboxSelected && !sandboxRepoValid
+          ? "Please enter a valid repository URL"
+          : !sandboxSelected && (!selectedHostId || !workspaceValid)
+            ? "Please choose a host and working directory"
+            : message.trim().length === 0
+              ? "Enter a message to get started"
+              : null;
 
   // Chip display labels.
   const workspaceLabel = workspaceTrimmed
@@ -2814,10 +2870,19 @@ export function NewChatLandingScreen() {
     setCreateError(null);
     try {
       const trimmedBranch = branchName.trim();
-      const primaryDirectory = normalizeWorkspacePath(workspaceTrimmed);
-      const attachedDirectories = additionalDirectories.filter(
+      const creationHostId = pmProject?.host_id ?? selectedHostId;
+      const creationWorkspace = pmProject?.workspace ?? workspaceTrimmed;
+      const authoritativeDirectories = pmProject
+        ? normalizeProjectDirectories(pmProject.directories, pmProject.workspace).map(
+            (directory) => directory.path,
+          )
+        : additionalDirectories;
+      const primaryDirectory = normalizeWorkspacePath(creationWorkspace);
+      const attachedDirectories = authoritativeDirectories.filter(
         (path) => normalizeWorkspacePath(path) !== primaryDirectory,
       );
+      const createWorktree = pmProject == null && shouldCreateWorktree;
+      const bindExistingWorktree = pmProject == null && startInExistingWorktree;
       // `shouldCreateWorktree` (component scope): true only when a branch is
       // named and the workspace isn't already an existing worktree. Starting
       // in an existing worktree sends no git opts — the workspace is bound
@@ -2839,7 +2904,8 @@ export function NewChatLandingScreen() {
         // same way the fork-resume path does.
         const bundle = await buildAgentBundle(pendingAgent);
         const metadata: Record<string, unknown> = {};
-        if (workspaceTrimmed) metadata.workspace = workspaceTrimmed;
+        if (creationHostId) metadata.host_id = creationHostId;
+        if (creationWorkspace) metadata.workspace = creationWorkspace;
         if (attachedDirectories.length > 0) {
           metadata.directories = attachedDirectories.map((path) => ({ path }));
         }
@@ -2849,16 +2915,16 @@ export function NewChatLandingScreen() {
         );
         // Launch the runner on the selected host. The multipart create
         // only stores DB rows — launchRunner binds + starts the runner.
-        if (!sandboxSelected && selectedHostId && workspaceTrimmed) {
+        if (!sandboxSelected && creationHostId && creationWorkspace) {
           // Create a new worktree, bind an existing one (records the branch
           // for the sidebar + delete flow without creating anything), or
           // neither — mirrored on the `git` block.
-          const gitOpts = shouldCreateWorktree
+          const gitOpts = createWorktree
             ? { branchName: trimmedBranch, baseBranch: baseBranch.trim() || undefined }
-            : startInExistingWorktree
+            : bindExistingWorktree
               ? { branchName: trimmedBranch, existingWorktree: true }
               : undefined;
-          await launchRunner(selectedHostId, data.id, workspaceTrimmed, gitOpts);
+          await launchRunner(creationHostId, data.id, creationWorkspace, gitOpts);
         }
         // Clear pending agent after successful creation.
         setPendingAgent(null);
@@ -2875,8 +2941,8 @@ export function NewChatLandingScreen() {
                   workspace: composeSandboxWorkspace(sandboxRepoUrl, sandboxRepoBranch),
                 }
               : {
-                  host_id: selectedHostId,
-                  workspace: workspaceTrimmed,
+                  host_id: creationHostId,
+                  workspace: creationWorkspace,
                   directories:
                     attachedDirectories.length > 0
                       ? attachedDirectories.map((path) => ({ path }))
@@ -2884,9 +2950,9 @@ export function NewChatLandingScreen() {
                   // Create a new worktree, or bind an existing one
                   // (`existing_worktree` records the branch for the sidebar +
                   // delete flow without creating anything), or neither.
-                  git: shouldCreateWorktree
+                  git: createWorktree
                     ? { branch_name: trimmedBranch, base_branch: baseBranch.trim() || undefined }
-                    : startInExistingWorktree
+                    : bindExistingWorktree
                       ? { branch_name: trimmedBranch, existing_worktree: true }
                       : undefined,
                 }),
@@ -2960,8 +3026,15 @@ export function NewChatLandingScreen() {
           // Leave the session unfiled; the user can file it from the sidebar.
         }
       }
+      if (pmProject) {
+        // Creation acquired the PM lease using the durable session id. Refresh
+        // the live folder and lease count; no PM view id is attached to the
+        // session or written through the native project APIs.
+        void queryClient.invalidateQueries({ queryKey: PM_PROJECT_SESSIONS_QUERY_KEY });
+        void queryClient.invalidateQueries({ queryKey: PM_PROJECTS_QUERY_KEY });
+      }
       // Sandbox creates have no user-picked workspace to remember.
-      if (!sandboxSelected) addRecent(workspaceTrimmed);
+      if (!sandboxSelected) addRecent(creationWorkspace);
       // Fire-and-forget: don't block navigation on the sidebar list refresh.
       // The background refetch (or the WS session_added push) backfills the
       // new session's row within ~1s of landing in the chat; the chat itself
@@ -3010,6 +3083,8 @@ export function NewChatLandingScreen() {
   const workspaceChip = (
     <button
       type="button"
+      disabled={pmProjectLocked}
+      title={pmProjectLocked ? "Managed by this PM project" : undefined}
       className="flex h-6 items-center gap-1 rounded-full px-2.5 text-13 font-normal text-muted-foreground transition-colors hover:text-foreground"
       data-testid="new-chat-landing-workspace-chip"
     >
@@ -3022,7 +3097,7 @@ export function NewChatLandingScreen() {
       >
         {workspaceLabel}
       </span>
-      <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
+      {!pmProjectLocked && <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />}
     </button>
   );
 
@@ -3064,7 +3139,7 @@ export function NewChatLandingScreen() {
           edges; widens to the full px-10 at the md breakpoint and up. */}
       <div className="flex w-full max-w-[840px] flex-col items-center gap-8 px-4 pt-8 pb-16 md:select-none md:px-10">
         <div className="flex w-full flex-col items-center justify-center gap-3.5 sm:flex-row">
-          {selectedProject ? (
+          {selectedProject || pmProject ? (
             // Landing inside a project: swap Otto's eyes for the same folder
             // icon the sidebar uses for a project, and name the project. Sized
             // to Otto's h-18 box so the centered composer doesn't shift when
@@ -3076,7 +3151,7 @@ export function NewChatLandingScreen() {
             <OttoEyes className="h-18 w-auto shrink-0" />
           )}
           <h1 className="min-w-0 break-words text-center text-3xl font-medium tracking-[-0.03em] text-foreground line-clamp-2 sm:text-left">
-            {selectedProject || "What should we do?"}
+            {pmProject?.name || selectedProject || "What should we do?"}
           </h1>
         </div>
         <div className="relative flex w-full flex-col gap-3">
@@ -3480,6 +3555,7 @@ export function NewChatLandingScreen() {
             <div className="flex flex-wrap items-center gap-1">
               {/* Host chip */}
               <DropdownMenu
+                open={pmProjectLocked ? false : undefined}
                 onOpenChange={(open) => {
                   // Run a requested "connect this machine" only once the menu
                   // has closed.
@@ -3492,6 +3568,8 @@ export function NewChatLandingScreen() {
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
+                    disabled={pmProjectLocked}
+                    title={pmProjectLocked ? "Managed by this PM project" : undefined}
                     className="flex h-6 items-center gap-1 rounded-full px-2.5 text-13 font-normal text-muted-foreground transition-colors hover:text-foreground"
                     data-testid="new-chat-landing-host-chip"
                   >
@@ -3505,7 +3583,9 @@ export function NewChatLandingScreen() {
                     >
                       {hostLabel}
                     </span>
-                    <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
+                    {!pmProjectLocked && (
+                      <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
+                    )}
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="min-w-52">
@@ -3729,7 +3809,10 @@ export function NewChatLandingScreen() {
                 sandbox sessions — the repository chip above replaces it (the
                 server creates the directory inside the sandbox). */}
               {!sandboxSelected && (
-                <Popover open={workspacePopoverOpen} onOpenChange={setWorkspacePopoverOpen}>
+                <Popover
+                  open={pmProjectLocked ? false : workspacePopoverOpen}
+                  onOpenChange={pmProjectLocked ? undefined : setWorkspacePopoverOpen}
+                >
                   <PopoverTrigger asChild>{workspaceChip}</PopoverTrigger>
                   {/* Cap to the viewport so the 420px browser can't overflow a
                   narrow screen; desktop still gets the full width. */}
@@ -3771,18 +3854,20 @@ export function NewChatLandingScreen() {
                     <span className="hidden truncate sm:block">
                       {path.split("/").filter(Boolean).pop() ?? path}
                     </span>
-                    <button
-                      type="button"
-                      className="shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                      aria-label={`Remove attached folder ${path}`}
-                      onClick={() =>
-                        setAdditionalDirectories((current) =>
-                          current.filter((directory) => directory !== path),
-                        )
-                      }
-                    >
-                      <XIcon className="size-3" />
-                    </button>
+                    {!pmProjectLocked && (
+                      <button
+                        type="button"
+                        className="shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                        aria-label={`Remove attached folder ${path}`}
+                        onClick={() =>
+                          setAdditionalDirectories((current) =>
+                            current.filter((directory) => directory !== path),
+                          )
+                        }
+                      >
+                        <XIcon className="size-3" />
+                      </button>
+                    )}
                   </span>
                 ))}
 
@@ -3790,7 +3875,7 @@ export function NewChatLandingScreen() {
                   worktree, when requested, still applies only to the primary
                   working directory. Managed sandboxes intentionally hide this
                   control because their filesystem is server-provisioned. */}
-              {!sandboxSelected && additionalDirectories.length < 15 && (
+              {!sandboxSelected && !pmProjectLocked && additionalDirectories.length < 15 && (
                 <Popover
                   open={additionalDirectoryPopoverOpen}
                   onOpenChange={setAddDirectoryPopoverOpen}
@@ -3843,7 +3928,7 @@ export function NewChatLandingScreen() {
 
               {/* Git worktree chip — hidden for sandbox sessions (worktree
                 creation requires a caller-supplied host_id). */}
-              {!sandboxSelected && (
+              {!sandboxSelected && !pmProjectLocked && (
                 <Popover open={worktreePopoverOpen} onOpenChange={setWorktreePopoverOpen}>
                   <PopoverTrigger asChild>
                     <button
@@ -4066,6 +4151,13 @@ export function NewChatLandingScreen() {
           {createError && (
             <p className="text-xs text-destructive" data-testid="new-chat-landing-error">
               {createError}
+            </p>
+          )}
+          {pmProjectError && (
+            <p className="text-xs text-destructive" data-testid="new-chat-landing-pm-error">
+              {pmProjectLoadError instanceof Error
+                ? pmProjectLoadError.message
+                : "PM project is unavailable"}
             </p>
           )}
         </div>
