@@ -19,6 +19,7 @@ from omnigent.server.pm_integration import (
     PmWorktree,
 )
 from omnigent.server.routes._sessions import orchestration
+from omnigent.server.routes.sessions import routes_core
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.host_store import HostStore
 from tests.server.helpers import build_agent_bundle, create_test_agent
@@ -77,6 +78,8 @@ def _patch_path_validation(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(orchestration, "_validate_session_workspace", _workspace)
     monkeypatch.setattr(orchestration, "_validate_session_directory", _directory)
+    monkeypatch.setattr(routes_core, "_validate_session_workspace", _workspace)
+    monkeypatch.setattr(routes_core, "_validate_session_directory", _directory)
 
 
 def _patch_pm(
@@ -116,8 +119,8 @@ def _patch_pm(
 
 
 async def _agent_id(client: httpx.AsyncClient) -> str:
-    session = await create_test_agent(client, name="pm-route-agent")
-    return session["agent_id"]
+    agent = await create_test_agent(client, name="pm-route-agent")
+    return agent["id"]
 
 
 async def _create_pm_session(client: httpx.AsyncClient, agent_id: str) -> httpx.Response:
@@ -177,9 +180,9 @@ async def test_create_releases_provisional_lease_when_persistence_fails(
         raise RuntimeError("persistence failed")
 
     monkeypatch.setattr(SqlAlchemyConversationStore, "create_conversation", _fail_create)
-    response = await _create_pm_session(client, agent_id)
+    with pytest.raises(RuntimeError, match="persistence failed"):
+        await _create_pm_session(client, agent_id)
 
-    assert response.status_code == 500
     assert len(acquired) == 1
     assert released == acquired
 
