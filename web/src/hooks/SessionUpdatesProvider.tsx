@@ -93,6 +93,19 @@ function applyItemsToCache(
     if (queryNeedsRefetch) needsRefetch = true;
     if (next !== data) queryClient.setQueryData(key, next);
   }
+  const pmProjectEntries = queryClient.getQueriesData<ConversationsInfiniteData>({
+    queryKey: ["pm-project-sessions"],
+  });
+  for (const [key, data] of pmProjectEntries) {
+    const {
+      data: next,
+      found,
+      needsRefetch: queryNeedsRefetch,
+    } = mergeItemsIntoPages(data, itemsById, PROJECT_FOLDER_FILTERS, activeId);
+    for (const id of found) foundAnywhere.add(id);
+    if (queryNeedsRefetch) needsRefetch = true;
+    if (next !== data) queryClient.setQueryData(key, next);
+  }
   return {
     missingIds: [...itemsById.keys()].filter((id) => !foundAnywhere.has(id)),
     needsRefetch,
@@ -110,7 +123,7 @@ function removeIdsFromCache(queryClient: QueryClient, ids: string[]): boolean {
   const idSet = new Set(ids);
   let removedAny = false;
   // Both the global lists and each project folder's own list (same page shape).
-  for (const queryKey of [["conversations"], ["project-sessions"]]) {
+  for (const queryKey of [["conversations"], ["project-sessions"], ["pm-project-sessions"]]) {
     const entries = queryClient.getQueriesData<ConversationsInfiniteData>({ queryKey });
     for (const [key, data] of entries) {
       const { data: next, removed } = removeIdsFromPages(data, idSet);
@@ -167,7 +180,12 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
     const projectEntries = queryClient.getQueriesData<ConversationsInfiniteData>({
       queryKey: ["project-sessions"],
     });
-    const ids = collectConversationIds([...entries, ...projectEntries].map(([, data]) => data));
+    const pmProjectEntries = queryClient.getQueriesData<ConversationsInfiniteData>({
+      queryKey: ["pm-project-sessions"],
+    });
+    const ids = collectConversationIds(
+      [...entries, ...projectEntries, ...pmProjectEntries].map(([, data]) => data),
+    );
     // Union in the open session. A directly-opened child / sub-agent
     // session is filtered out of the sidebar list, so it's absent from
     // every cached conversations page and wouldn't otherwise be watched —
@@ -214,6 +232,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
         // Converge each project folder's own list too (new/archived/relabeled
         // members the local field-patch can't place).
         void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+        void queryClient.invalidateQueries({ queryKey: ["pm-project-sessions"] });
         // Another client archiving/relabeling/deleting can add or remove a
         // project from the Archived view's picker; only local mutations
         // invalidate this scan otherwise.
@@ -242,6 +261,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           return;
         case "hosts_changed":
           void queryClient.invalidateQueries({ queryKey: ["hosts"] });
+          void queryClient.invalidateQueries({ queryKey: ["pm-projects"] });
           return;
         case "removed":
           for (const id of frame.ids) commentsFingerprintsRef.current.delete(id);
@@ -312,7 +332,12 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
       // Recompute the watch-set when either the global list or a project
       // folder's list changes (fetch, pagination, splice) so newly loaded
       // folder members join the stream's watch-set.
-      if (Array.isArray(key) && (key[0] === "conversations" || key[0] === "project-sessions")) {
+      if (
+        Array.isArray(key) &&
+        (key[0] === "conversations" ||
+          key[0] === "project-sessions" ||
+          key[0] === "pm-project-sessions")
+      ) {
         scheduleWatch();
       }
       // Also recompute when a child-sessions list loads so the tree nodes

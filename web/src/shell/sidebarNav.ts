@@ -96,6 +96,10 @@ export const COLLAPSED_SIDEBAR_SECTIONS_STORAGE_KEY = "omnigent:collapsed-sideba
 // when its name is present here.
 export const EXPANDED_PROJECT_SECTIONS_STORAGE_KEY = "omnigent:expanded-project-sections";
 
+// Live PM folders use stable virtual view ids (host + canonical project root),
+// not names: two connected hosts may expose projects with the same name.
+export const EXPANDED_PM_PROJECT_SECTIONS_STORAGE_KEY = "omnigent:expanded-pm-project-sections";
+
 // Snapshot of the active chat's updated_at at the moment the user
 // entered it. Used as the sort key for the active row so subsequent
 // updated_at bumps (the user sending a message) don't move it.
