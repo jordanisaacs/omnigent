@@ -52,6 +52,7 @@ from omnigent.server.background_session_titles import (
     prepare_background_session_title,
 )
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
+from omnigent.server.pm_integration import PmIntegrationService
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -116,6 +117,7 @@ def register_events_routes(
     host_registry: HostRegistry | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
     runner_tunnel_tokens: frozenset[str] | None = None,
+    pm_integration: PmIntegrationService | None = None,
 ) -> None:
     """Register the events, stream, and delete routes on router."""
 
@@ -1601,6 +1603,21 @@ def register_events_routes(
         conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if conv is None:
             raise _session_not_found()
+        pm_project_for_delete = None
+        if pm_integration is not None:
+            try:
+                pm_project_for_delete = await pm_integration.find_exact(
+                    user_id=user_id,
+                    host_id=conv.host_id,
+                    workspace=conv.workspace,
+                )
+            except Exception:
+                _logger.warning(
+                    "Could not resolve PM project before deleting session %s; "
+                    "reconciliation will retain or clean its lease",
+                    session_id,
+                    exc_info=True,
+                )
         await _best_effort_stop(session_id, conversation_store, runner_router)
         # Runner-side resource cleanup is best-effort: if the bound
         # runner is offline or unbound, the session must still be
@@ -1663,6 +1680,18 @@ def register_events_routes(
         deleted = await conversation_store.delete_conversation(session_id)
         if not deleted:
             raise _session_not_found()
+        # PM lease ordering is deliberate: the durable session deletion has
+        # committed before release is attempted. A failed/offline release is
+        # retained for reconnect reconciliation; no other lifecycle path releases.
+        if pm_project_for_delete is not None and pm_integration is not None:
+            try:
+                await pm_integration.release(pm_project_for_delete, session_id)
+            except Exception:
+                _logger.warning(
+                    "PM lease release failed after deleting session %s; reconciliation will retry",
+                    session_id,
+                    exc_info=True,
+                )
         # The session is gone, so is its launch-progress state. Failed
         # launches are retained in the cache for reload visibility while
         # the session exists; without this eviction every deleted

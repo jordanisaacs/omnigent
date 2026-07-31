@@ -283,6 +283,7 @@ def _new_session_metadata_row(
     conversation_id: str,
     parent_conversation_id: str | None = None,
     runner_id: str | None = None,
+    host_id: str | None = None,
     workspace: str | None = None,
     directories: tuple[SessionDirectory, ...] = (),
     terminal_launch_args: list[str] | None = None,
@@ -311,6 +312,7 @@ def _new_session_metadata_row(
         id=conversation_id,
         kind=encode_conversation_kind("sub_agent" if parent_conversation_id else "default"),
         runner_id=runner_id,
+        host_id=host_id,
         workspace=workspace,
         directories=encode_session_directories(validated_directories),
         terminal_launch_args=(
@@ -2162,6 +2164,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        host_id: str | None = None,
+        workspace: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -2225,6 +2229,8 @@ class SqlAlchemyConversationStore(ConversationStore):
             (an ``owner``-level grant) — stricter than ``accessible_by``,
             which also matches sessions merely shared with them. Powers
             the per-project folder fetch. ``None`` disables the filter.
+        :param host_id: Exact host-id filter. ``None`` disables it.
+        :param workspace: Exact canonical workspace filter. ``None`` disables it.
         :returns: A :class:`PagedList` of :class:`Conversation`
             objects.
         """
@@ -2246,9 +2252,14 @@ class SqlAlchemyConversationStore(ConversationStore):
 
         # kind and archived both live on the AP ``conversations`` table now
         # (kind derived from parent-nullness, archived a real column), so they
-        # are filtered directly on the AP query below. The only filters that
-        # still require an Omnigent-side prefetch are the permission scopes.
-        needs_meta_filter = (accessible_by is not None) or (owned_by is not None)
+        # are filtered directly on the AP query below. Permission and placement
+        # filters live in the Omnigent metadata DB and are prefetched as ids.
+        needs_meta_filter = (
+            accessible_by is not None
+            or owned_by is not None
+            or host_id is not None
+            or workspace is not None
+        )
 
         qualifying_ids: list[str] | None = None
         if needs_meta_filter:
@@ -2257,33 +2268,44 @@ class SqlAlchemyConversationStore(ConversationStore):
             # owned_by are intersected (both applied) to match the prior
             # behaviour. (ACL pushdown to a single AP query is a follow-up.)
             with self._session() as meta_sess:
-                accessible_set: set[str] | None = None
-                owned_set: set[str] | None = None
+                filter_sets: list[set[str]] = []
                 if accessible_by is not None:
-                    accessible_set = set(
-                        meta_sess.execute(
-                            select(SqlSessionPermission.conversation_id).where(
-                                SqlSessionPermission.workspace_id == current_workspace_id(),
-                                SqlSessionPermission.user_id == accessible_by,
-                            )
-                        ).scalars()
+                    filter_sets.append(
+                        set(
+                            meta_sess.execute(
+                                select(SqlSessionPermission.conversation_id).where(
+                                    SqlSessionPermission.workspace_id == current_workspace_id(),
+                                    SqlSessionPermission.user_id == accessible_by,
+                                )
+                            ).scalars()
+                        )
                     )
                 if owned_by is not None:
-                    owned_set = set(
-                        meta_sess.execute(
-                            select(SqlSessionPermission.conversation_id).where(
-                                SqlSessionPermission.workspace_id == current_workspace_id(),
-                                SqlSessionPermission.user_id == owned_by,
-                                SqlSessionPermission.level >= LEVEL_OWNER,
-                            )
-                        ).scalars()
+                    filter_sets.append(
+                        set(
+                            meta_sess.execute(
+                                select(SqlSessionPermission.conversation_id).where(
+                                    SqlSessionPermission.workspace_id == current_workspace_id(),
+                                    SqlSessionPermission.user_id == owned_by,
+                                    SqlSessionPermission.level >= LEVEL_OWNER,
+                                )
+                            ).scalars()
+                        )
                     )
-                if accessible_set is not None and owned_set is not None:
-                    qualifying_ids = list(accessible_set & owned_set)
-                else:
-                    qualifying_ids = list(
-                        accessible_set if accessible_set is not None else owned_set or set()
+                if host_id is not None or workspace is not None:
+                    placement_stmt = select(SqlConversationMetadata.id).where(
+                        SqlConversationMetadata.workspace_id == current_workspace_id()
                     )
+                    if host_id is not None:
+                        placement_stmt = placement_stmt.where(
+                            SqlConversationMetadata.host_id == host_id
+                        )
+                    if workspace is not None:
+                        placement_stmt = placement_stmt.where(
+                            SqlConversationMetadata.workspace == workspace
+                        )
+                    filter_sets.append(set(meta_sess.execute(placement_stmt).scalars()))
+                qualifying_ids = list(set.intersection(*filter_sets)) if filter_sets else None
 
         with self._conv_session() as session:
             stmt = select(SqlConversation).where(
@@ -3177,6 +3199,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         terminal_launch_args: list[str] | None = None,
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
+        host_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> CreatedSession:
         """
         Atomically insert a conversation row and session-scoped agent.
@@ -3231,7 +3255,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             conversation exists.
         """
         return self._create_session_with_agent_with_id(
-            generate_conversation_id(),
+            conversation_id or generate_conversation_id(),
             agent_id=agent_id,
             agent_name=agent_name,
             agent_bundle_location=agent_bundle_location,
@@ -3244,6 +3268,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             terminal_launch_args=terminal_launch_args,
             parent_conversation_id=parent_conversation_id,
             runner_id=runner_id,
+            host_id=host_id,
         )
 
     def _create_session_with_agent_with_id(
@@ -3262,6 +3287,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         terminal_launch_args: list[str] | None = None,
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
+        host_id: str | None = None,
     ) -> CreatedSession:
         """Body of :meth:`create_session_with_agent` under a caller-supplied
         ``conversation_id``. The public method generates a fresh id; this seam
@@ -3309,6 +3335,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             conversation_id,
             parent_conversation_id=parent_conversation_id,
             runner_id=runner_id,
+            host_id=host_id,
             workspace=workspace,
             directories=directories,
             terminal_launch_args=terminal_launch_args,
@@ -3324,6 +3351,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         self,
         source_conversation_id: str,
         *,
+        conversation_id: str | None = None,
         title: str | None = None,
         agent_id: str | None = None,
         cloned_agent_name: str | None = None,
@@ -3335,6 +3363,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         resume_source_native_session: bool = True,
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
+        host_id: str | None = None,
+        workspace: str | None = None,
+        directories: tuple[SessionDirectory, ...] = (),
     ) -> Conversation:
         """
         Deep-copy a conversation and its items into a new conversation.
@@ -3423,7 +3454,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             the source conversation has that ``response_id``.
         """
         return self._fork_conversation_with_id(
-            generate_conversation_id(),
+            conversation_id or generate_conversation_id(),
             source_conversation_id,
             title=title,
             agent_id=agent_id,
@@ -3436,6 +3467,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             resume_source_native_session=resume_source_native_session,
             presentation_labels=presentation_labels,
             up_to_response_id=up_to_response_id,
+            host_id=host_id,
+            workspace=workspace,
+            directories=directories,
         )
 
     def _fork_conversation_with_id(
@@ -3454,6 +3488,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         resume_source_native_session: bool = True,
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
+        host_id: str | None = None,
+        workspace: str | None = None,
+        directories: tuple[SessionDirectory, ...] = (),
     ) -> Conversation:
         """Body of :meth:`fork_conversation` under a caller-supplied
         ``conversation_id``. The public method generates a fresh id; this seam
@@ -3634,7 +3671,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 if source_meta_ref and copy_terminal_launch_args
                 else None
             )
-            if source_workspace is not None:
+            if source_workspace is not None and workspace is None:
                 fork_labels[FORK_SOURCE_LABEL_KEY] = source_conversation_id
             # Carry the source's native session id as a one-shot fork
             # directive so a native harness can resume + branch the source's
@@ -3669,10 +3706,18 @@ class SqlAlchemyConversationStore(ConversationStore):
             if fork_labels:
                 _upsert_labels(session, new_conv.id, fork_labels, now)
 
-            # Build the fork's metadata row (default kind, no runner/host/workspace).
+            validated_directories = validate_workspace_directory_consistency(
+                directories,
+                workspace,
+            )
+            # Ordinary forks remain unbound. Integration-managed forks may
+            # supply an already-leased host/workspace/directory snapshot.
             fork_meta = SqlConversationMetadata(
                 id=new_conv_id,
                 kind=encode_conversation_kind("default"),
+                host_id=host_id,
+                workspace=workspace,
+                directories=encode_session_directories(validated_directories),
                 # Copy terminal args from source so the fork launches with same native args.
                 terminal_launch_args=source_terminal_args,
             )

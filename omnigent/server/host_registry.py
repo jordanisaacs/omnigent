@@ -306,6 +306,9 @@ class HostConnection:
     pending_model_options: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )
+    pending_integration_requests: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
 
 
 class HostRegistry:

@@ -20,6 +20,8 @@ from omnigent.host.frames import (
     HostHelloFrame,
     HostInstallHarnessFrame,
     HostInstallHarnessResultFrame,
+    HostIntegrationRequestFrame,
+    HostIntegrationResultFrame,
     HostLaunchRunnerFrame,
     HostLaunchRunnerResultFrame,
     HostListDirEntry,
@@ -139,6 +141,32 @@ def test_hello_frame_round_trip() -> None:
     assert decoded.frame_protocol_version == 1
     assert decoded.name == "corey-laptop"
     assert decoded.runners == ["runner_token_aaa", "runner_token_bbb"]
+
+
+def test_integration_frames_and_hello_capabilities_round_trip() -> None:
+    """Generic integration capabilities and request payloads survive the tunnel."""
+    hello = HostHelloFrame(
+        version="0.1.0",
+        frame_protocol_version=1,
+        name="pm-host",
+        integrations={"pm": {"protocol_version": 1}},
+    )
+    assert decode_host_frame(encode_host_frame(hello)) == hello
+
+    request = HostIntegrationRequestFrame(
+        request_id="req_pm",
+        integration="pm",
+        operation="lease_acquire",
+        arguments={"project": "demo", "lease_id": "conv_1"},
+    )
+    assert decode_host_frame(encode_host_frame(request)) == request
+
+    result = HostIntegrationResultFrame(
+        request_id="req_pm",
+        status="ok",
+        payload=[{"lease_id": "conv_1"}],
+    )
+    assert decode_host_frame(encode_host_frame(result)) == result
 
 
 def test_hello_frame_empty_runners() -> None:

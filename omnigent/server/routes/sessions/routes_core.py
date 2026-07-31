@@ -30,7 +30,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from omnigent.cost_plan import (
     reserved_cost_control_keys,
 )
-from omnigent.db.utils import generate_agent_id
+from omnigent.db.utils import generate_agent_id, generate_conversation_id
 from omnigent.entities import (
     CommentsFingerprint,
     Conversation,
@@ -73,6 +73,7 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
 from omnigent.server.permissions import check_session_access
+from omnigent.server.pm_integration import PmIntegrationService
 from omnigent.server.routes._auth_helpers import (
     get_approval_access as _get_approval_access,
 )
@@ -120,6 +121,7 @@ from omnigent.server.schemas import (
     SessionSwitchAgentRequest,
     UpdateSessionRequest,
 )
+from omnigent.session_directories import build_session_directories, select_session_directories
 from omnigent.session_lifecycle import (
     labels_with_closed_status,
 )
@@ -155,6 +157,7 @@ def register_core_routes(
     host_registry: HostRegistry | None = None,
     project_store: ProjectStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
+    pm_integration: PmIntegrationService | None = None,
 ) -> None:
     """Register the core session routes on router."""
 
@@ -246,6 +249,7 @@ def register_core_routes(
             file_store=file_store,
             artifact_store=artifact_store,
             background_title_coordinator=background_title_coordinator,
+            pm_integration=pm_integration,
         )
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.
@@ -526,14 +530,123 @@ def register_core_routes(
             )
 
         bundle_bytes = await bundle.read()
-        result = await asyncio.to_thread(
-            _create_session_from_bundle,
-            conversation_store,
-            artifact_store,
-            parsed_metadata,
-            bundle_bytes,
-            inherited_runner_id,
-        )
+        bundled_pm_lease = None
+        bundled_session_id: str | None = None
+        bundled_host_id: str | None = None
+        bundled_workspace: str | None = None
+        bundled_directories = None
+        if pm_integration is not None:
+            if parsed_metadata.parent_session_id is not None:
+                parent = await asyncio.to_thread(
+                    conversation_store.get_conversation,
+                    parsed_metadata.parent_session_id,
+                )
+                if parent is not None:
+                    selected = select_session_directories(
+                        parent.directories,
+                        parsed_metadata.directory_ids,
+                    )
+                    default = next((item for item in selected if item.id == "default"), None)
+                    candidate_host = parent.host_id
+                    candidate_workspace = default.path if default is not None else None
+                    candidate_selected_paths = [
+                        item.path for item in selected if item.id != "default"
+                    ]
+                else:
+                    candidate_host = None
+                    candidate_workspace = None
+                    candidate_selected_paths = []
+            else:
+                candidate_host = parsed_metadata.host_id
+                candidate_workspace = parsed_metadata.workspace
+                candidate_selected_paths = []
+            pm_project = await pm_integration.find_exact(
+                user_id=user_id,
+                host_id=candidate_host,
+                workspace=candidate_workspace,
+            )
+            if pm_project is not None:
+                bundled_session_id = generate_conversation_id()
+                try:
+                    bundled_pm_lease = await pm_integration.acquire(
+                        pm_project,
+                        bundled_session_id,
+                    )
+                    requested_paths = [worktree.path for worktree in bundled_pm_lease.worktrees]
+                    canonical_paths = list(
+                        await asyncio.gather(
+                            *(
+                                _validate_session_directory(
+                                    user_id=user_id,
+                                    host_id=candidate_host or "",
+                                    directory=worktree.path,
+                                    request=request,
+                                )
+                                for worktree in bundled_pm_lease.worktrees
+                            )
+                        )
+                    )
+                    if parsed_metadata.parent_session_id is not None:
+                        if set(candidate_selected_paths) != set(canonical_paths):
+                            raise OmnigentError(
+                                "a PM project child must retain all active project worktrees",
+                                code=ErrorCode.INVALID_INPUT,
+                            )
+                    elif parsed_metadata.directories:
+                        supplied_paths = list(
+                            await asyncio.gather(
+                                *(
+                                    _validate_session_directory(
+                                        user_id=user_id,
+                                        host_id=candidate_host or "",
+                                        directory=directory.path,
+                                        request=request,
+                                    )
+                                    for directory in parsed_metadata.directories
+                                )
+                            )
+                        )
+                        if set(supplied_paths) != set(canonical_paths):
+                            raise OmnigentError(
+                                "directories must exactly match the PM project's active worktrees",
+                                code=ErrorCode.INVALID_INPUT,
+                            )
+                    bundled_host_id = candidate_host
+                    bundled_workspace = candidate_workspace
+                    bundled_directories = build_session_directories(
+                        candidate_workspace,
+                        canonical_paths,
+                        requested_additional_paths=requested_paths,
+                    )
+                except Exception:
+                    if bundled_pm_lease is not None:
+                        with contextlib.suppress(Exception):
+                            await pm_integration.release(
+                                bundled_pm_lease.project,
+                                bundled_session_id,
+                            )
+                    raise
+        try:
+            result = await asyncio.to_thread(
+                _create_session_from_bundle,
+                conversation_store,
+                artifact_store,
+                parsed_metadata,
+                bundle_bytes,
+                inherited_runner_id,
+                conversation_id=bundled_session_id,
+                host_id=bundled_host_id,
+                workspace_override=bundled_workspace,
+                directories_override=bundled_directories,
+            )
+        except Exception:
+            if bundled_pm_lease is not None and pm_integration is not None:
+                with contextlib.suppress(Exception):
+                    await pm_integration.release(
+                        bundled_pm_lease.project,
+                        bundled_session_id or "",
+                    )
+            raise
         # Top-level creates (no inherited runner) skip the notify —
         # their runner registers itself later.
         if inherited_runner_id is not None:
@@ -762,6 +875,8 @@ def register_core_routes(
         kind: str = Query(default="default", pattern="^(default|sub_agent|any)$"),
         project: str | None = Query(default=None),
         pinned: bool = Query(default=False),
+        host_id: str | None = Query(default=None),
+        workspace: str | None = Query(default=None),
     ) -> PaginatedList:
         """
         List sessions with cursor-based pagination.
@@ -809,6 +924,8 @@ def register_core_routes(
             has pinned (the ``omnigent.pinned`` label). Lets the
             sidebar enumerate pinned sessions that fall outside the
             loaded pagination window. ``False`` (default) disables it.
+        :param host_id: Exact host-id filter for virtual integrations.
+        :param workspace: Exact canonical workspace filter for virtual integrations.
         :returns: A :class:`PaginatedList` of
             :class:`SessionListItem`.
         """
@@ -855,6 +972,8 @@ def register_core_routes(
             pinned=pinned,
             # Pins are per-user: filter to the caller's own pin key.
             pinned_owner=user_id,
+            host_id=host_id,
+            workspace=workspace,
         )
         # list_conversations may return rows with agent_id=None for
         # legacy conversations; skip them before building the batch IDs.
@@ -2014,6 +2133,49 @@ def register_core_routes(
             else None
         )
 
+        pm_fork_lease = None
+        fork_id: str | None = None
+        pm_fork_kwargs: dict[str, Any] = {}
+        if pm_integration is not None:
+            try:
+                pm_project = await pm_integration.find_exact(
+                    user_id=user_id,
+                    host_id=source.host_id,
+                    workspace=source.workspace,
+                )
+                if pm_project is not None:
+                    fork_id = generate_conversation_id()
+                    pm_fork_lease = await pm_integration.acquire(pm_project, fork_id)
+                    requested_paths = [worktree.path for worktree in pm_fork_lease.worktrees]
+                    canonical_paths = list(
+                        await asyncio.gather(
+                            *(
+                                _validate_session_directory(
+                                    user_id=user_id,
+                                    host_id=source.host_id or "",
+                                    directory=worktree.path,
+                                    request=request,
+                                )
+                                for worktree in pm_fork_lease.worktrees
+                            )
+                        )
+                    )
+                    pm_fork_kwargs = {
+                        "conversation_id": fork_id,
+                        "host_id": source.host_id,
+                        "workspace": source.workspace,
+                        "directories": build_session_directories(
+                            source.workspace,
+                            canonical_paths,
+                            requested_additional_paths=requested_paths,
+                        ),
+                    }
+            except Exception:
+                if pm_fork_lease is not None:
+                    with contextlib.suppress(Exception):
+                        await pm_integration.release(pm_fork_lease.project, fork_id or "")
+                raise
+
         try:
             new_conv = await asyncio.to_thread(
                 conversation_store.fork_conversation,
@@ -2034,8 +2196,12 @@ def register_core_routes(
                 resume_source_native_session=resume_source_native_session,
                 presentation_labels=presentation_labels,
                 up_to_response_id=body.up_to_response_id,
+                **pm_fork_kwargs,
             )
         except LookupError as exc:
+            if pm_fork_lease is not None and pm_integration is not None:
+                with contextlib.suppress(Exception):
+                    await pm_integration.release(pm_fork_lease.project, fork_id or "")
             raise OmnigentError(
                 f"Session not found: {source_id!r}",
                 code=ErrorCode.NOT_FOUND,
@@ -2043,10 +2209,18 @@ def register_core_routes(
         except ValueError as exc:
             # Store raises ValueError when up_to_response_id names no
             # response in the source conversation (stale client state).
+            if pm_fork_lease is not None and pm_integration is not None:
+                with contextlib.suppress(Exception):
+                    await pm_integration.release(pm_fork_lease.project, fork_id or "")
             raise OmnigentError(
                 str(exc),
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+        except Exception:
+            if pm_fork_lease is not None and pm_integration is not None:
+                with contextlib.suppress(Exception):
+                    await pm_integration.release(pm_fork_lease.project, fork_id or "")
+            raise
 
         if permission_store is not None and user_id is not None:
             await asyncio.to_thread(permission_store.ensure_user, user_id)

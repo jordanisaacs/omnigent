@@ -8,6 +8,7 @@ imported by the router in ``sessions.py``."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 import time
@@ -22,7 +23,7 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import ValidationError
 
-from omnigent.db.utils import generate_agent_id, generate_task_id
+from omnigent.db.utils import generate_agent_id, generate_conversation_id, generate_task_id
 from omnigent.entities import (
     Agent,
     CommentsFingerprint,
@@ -101,6 +102,7 @@ from omnigent.server.managed_hosts import (
     host_resume_supported,
     host_sandbox_is_running,
 )
+from omnigent.server.pm_integration import PmIntegrationService, PmLeaseSnapshot
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -151,6 +153,7 @@ from omnigent.server.schemas import (
 )
 from omnigent.session_directories import (
     DEFAULT_DIRECTORY_ID,
+    SessionDirectory,
     build_session_directories,
     select_session_directories,
 )
@@ -5293,6 +5296,7 @@ async def _create_session_from_existing_agent(
     file_store: FileStore | None = None,
     artifact_store: ArtifactStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
+    pm_integration: PmIntegrationService | None = None,
 ) -> SessionResponse:
     """
     Create a session bound to an already-registered agent.
@@ -5424,6 +5428,7 @@ async def _create_session_from_existing_agent(
     # repo; the worktree it produces becomes the stored workspace.
     canonical_workspace: str | None = None if body.host_type == "managed" else body.workspace
     canonical_additional_paths = [directory.path for directory in body.directories]
+    requested_additional_paths = [directory.path for directory in body.directories]
     if body.host_id is not None and parent_conv is None:
         canonical_workspace = await _validate_session_workspace(
             user_id=user_id,
@@ -5446,6 +5451,50 @@ async def _create_session_from_existing_agent(
                 )
             )
         )
+
+    session_id = generate_conversation_id()
+    pm_lease: PmLeaseSnapshot | None = None
+    effective_host_id = body.host_id
+    if pm_integration is not None and parent_conv is None:
+        try:
+            pm_project = await pm_integration.find_exact(
+                user_id=user_id,
+                host_id=body.host_id,
+                workspace=canonical_workspace,
+            )
+            if pm_project is not None:
+                if body.git is not None:
+                    raise OmnigentError(
+                        "PM project sessions use the project's leased worktrees; "
+                        "Git worktree creation is not allowed",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                pm_lease = await pm_integration.acquire(pm_project, session_id)
+                requested_additional_paths = [worktree.path for worktree in pm_lease.worktrees]
+                leased_paths = list(
+                    await asyncio.gather(
+                        *(
+                            _validate_session_directory(
+                                user_id=user_id,
+                                host_id=body.host_id or "",
+                                directory=worktree.path,
+                                request=request,
+                            )
+                            for worktree in pm_lease.worktrees
+                        )
+                    )
+                )
+                if body.directories and set(canonical_additional_paths) != set(leased_paths):
+                    raise OmnigentError(
+                        "directories must exactly match the PM project's active worktrees",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                canonical_additional_paths = leased_paths
+        except Exception:
+            if pm_lease is not None:
+                with contextlib.suppress(Exception):
+                    await pm_integration.release(pm_lease.project, session_id)
+            raise
 
     # Git worktree options (optional). Two modes on body.git:
     #  - create (default): make a worktree; it becomes the stored
@@ -5501,7 +5550,7 @@ async def _create_session_from_existing_agent(
             session_directories = build_session_directories(
                 canonical_workspace,
                 canonical_additional_paths,
-                requested_additional_paths=(directory.path for directory in body.directories),
+                requested_additional_paths=requested_additional_paths,
             )
     except ValueError as exc:
         if (
@@ -5517,7 +5566,49 @@ async def _create_session_from_existing_agent(
                 request=request,
                 reason="create-rollback",
             )
+        if pm_lease is not None and pm_integration is not None:
+            with contextlib.suppress(Exception):
+                await pm_integration.release(pm_lease.project, session_id)
         raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
+
+    if pm_integration is not None and parent_conv is not None and canonical_workspace is not None:
+        try:
+            pm_project = await pm_integration.find_exact(
+                user_id=user_id,
+                host_id=parent_conv.host_id,
+                workspace=canonical_workspace,
+            )
+            if pm_project is not None:
+                pm_lease = await pm_integration.acquire(pm_project, session_id)
+                leased_paths = list(
+                    await asyncio.gather(
+                        *(
+                            _validate_session_directory(
+                                user_id=user_id,
+                                host_id=parent_conv.host_id or "",
+                                directory=worktree.path,
+                                request=request,
+                            )
+                            for worktree in pm_lease.worktrees
+                        )
+                    )
+                )
+                selected_paths = [
+                    directory.path
+                    for directory in session_directories
+                    if directory.id != DEFAULT_DIRECTORY_ID
+                ]
+                if set(selected_paths) != set(leased_paths):
+                    raise OmnigentError(
+                        "a PM project child must retain all active project worktrees",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                effective_host_id = parent_conv.host_id
+        except Exception:
+            if pm_lease is not None:
+                with contextlib.suppress(Exception):
+                    await pm_integration.release(pm_lease.project, session_id)
+            raise
 
     # Native-terminal pass-through args.
     #
@@ -5550,6 +5641,9 @@ async def _create_session_from_existing_agent(
                 _derive_terminal_launch_args_from_spec(sub_spec) if sub_spec is not None else None
             )
         except ValueError as exc:
+            if pm_lease is not None and pm_integration is not None:
+                with contextlib.suppress(Exception):
+                    await pm_integration.release(pm_lease.project, session_id)
             raise OmnigentError(
                 f"invalid terminal_launch_args in sub-agent spec: {exc}",
                 code=ErrorCode.INVALID_INPUT,
@@ -5558,6 +5652,9 @@ async def _create_session_from_existing_agent(
         try:
             validated_launch_args = _validate_terminal_launch_args(body.terminal_launch_args)
         except ValueError as exc:
+            if pm_lease is not None and pm_integration is not None:
+                with contextlib.suppress(Exception):
+                    await pm_integration.release(pm_lease.project, session_id)
             raise OmnigentError(
                 f"invalid terminal_launch_args: {exc}",
                 code=ErrorCode.INVALID_INPUT,
@@ -5571,11 +5668,12 @@ async def _create_session_from_existing_agent(
             runner_id=inherited_runner_id,
             kind="sub_agent" if body.parent_session_id else "default",
             sub_agent_name=body.sub_agent_name,
-            host_id=body.host_id,
+            host_id=effective_host_id,
             workspace=canonical_workspace,
             directories=session_directories,
             git_branch=git_branch,
             terminal_launch_args=validated_launch_args,
+            conversation_id=session_id,
         )
     except Exception:
         # Broad catch is intentional: ANY create_conversation failure
@@ -5598,6 +5696,9 @@ async def _create_session_from_existing_agent(
                 request=request,
                 reason="create-rollback",
             )
+        if pm_lease is not None and pm_integration is not None:
+            with contextlib.suppress(Exception):
+                await pm_integration.release(pm_lease.project, session_id)
         raise
 
     # The create request has no conv id in its URL, so the path-based
@@ -5791,6 +5892,11 @@ def _create_session_from_bundle(
     metadata: SessionCreateMetadata,
     bundle_bytes: bytes,
     runner_id: str | None = None,
+    *,
+    conversation_id: str | None = None,
+    host_id: str | None = None,
+    workspace_override: str | None = None,
+    directories_override: tuple[SessionDirectory, ...] | None = None,
 ) -> CreatedSessionResponse:
     """
     Validate, store, and persist a bundled session request.
@@ -5852,6 +5958,10 @@ def _create_session_from_bundle(
         agent_bundle_location=agent_bundle_location,
         agent_description=spec.description,
         runner_id=runner_id,
+        conversation_id=conversation_id,
+        host_id=host_id,
+        workspace_override=workspace_override,
+        directories_override=directories_override,
     )
 
 
