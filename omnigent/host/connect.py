@@ -47,6 +47,8 @@ from omnigent.host.frames import (
     HostHelloFrame,
     HostInstallHarnessFrame,
     HostInstallHarnessResultFrame,
+    HostIntegrationRequestFrame,
+    HostIntegrationResultFrame,
     HostLaunchRunnerFrame,
     HostLaunchRunnerResultFrame,
     HostListDirEntry,
@@ -2814,6 +2816,9 @@ class HostProcess:
             pass
         configured_harnesses = await asyncio.to_thread(configured_harness_map)
         gateway_inference = await asyncio.to_thread(gateway_inference_map)
+        from omnigent.host.pm_integration import advertised_capabilities
+
+        integrations = await asyncio.to_thread(advertised_capabilities)
         hello = HostHelloFrame(
             version=VERSION,
             frame_protocol_version=1,
@@ -2825,6 +2830,7 @@ class HostProcess:
             gateway_inference=gateway_inference,
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
+            integrations=integrations,
         )
         await ws.send(encode_host_frame(hello))
         self._ws = ws
@@ -3018,6 +3024,37 @@ class HostProcess:
             await ws.send(encode_host_frame(fs_result))
         elif isinstance(frame, HostModelOptionsFrame):
             await ws.send(encode_host_frame(await self._handle_model_options(frame)))
+        elif isinstance(frame, HostIntegrationRequestFrame):
+            result = await asyncio.to_thread(self._handle_integration_request, frame)
+            await ws.send(encode_host_frame(result))
+
+    def _handle_integration_request(
+        self,
+        frame: HostIntegrationRequestFrame,
+    ) -> HostIntegrationResultFrame:
+        """Execute one generic host integration request through its allowlist."""
+        if frame.integration != "pm":
+            return HostIntegrationResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=f"unsupported host integration: {frame.integration!r}",
+            )
+        from omnigent.host.pm_integration import PmIntegrationError, execute
+
+        try:
+            with self._host_subprocess_op():
+                payload = execute(frame.operation, frame.arguments)
+        except PmIntegrationError as exc:
+            return HostIntegrationResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=str(exc),
+            )
+        return HostIntegrationResultFrame(
+            request_id=frame.request_id,
+            status="ok",
+            payload=payload,
+        )
 
 
 def run_host_process(

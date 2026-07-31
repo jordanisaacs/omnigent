@@ -34,6 +34,7 @@ from omnigent.host.frames import (
     HostHarnessReadinessFrame,
     HostHelloFrame,
     HostInstallHarnessResultFrame,
+    HostIntegrationResultFrame,
     HostLaunchRunnerResultFrame,
     HostListDirResultFrame,
     HostListWorktreesResultFrame,
@@ -685,6 +686,18 @@ async def _receive_loop(
                         "status": frame.status,
                         "models": frame.models,
                         "routable_models": frame.routable_models,
+                        "error": frame.error,
+                    }
+                )
+            continue
+
+        if isinstance(frame, HostIntegrationResultFrame):
+            integration_future = conn.pending_integration_requests.pop(frame.request_id, None)
+            if integration_future is not None and not integration_future.done():
+                integration_future.set_result(
+                    {
+                        "status": frame.status,
+                        "payload": frame.payload,
                         "error": frame.error,
                     }
                 )

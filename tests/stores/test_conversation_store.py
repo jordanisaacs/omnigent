@@ -2694,6 +2694,30 @@ def test_create_conversation_with_host_id(
     assert fetched.workspace == "/Users/corey/projects/myapp"
 
 
+def test_list_conversations_filters_exact_host_and_workspace(
+    conversation_store: SqlAlchemyConversationStore,
+    db_uri: str,
+) -> None:
+    """Virtual project membership is the intersection of exact placement fields."""
+    host_a = "4f64b6ee625f4e8259185c35c6e63f3d"
+    host_b = "292dfcdf8a31f1319b469f4fa179ac6b"
+    _register_host(db_uri, host_a)
+    _register_host(db_uri, host_b)
+    exact = conversation_store.create_conversation(
+        host_id=host_a,
+        workspace="/projects/demo",
+    )
+    conversation_store.create_conversation(host_id=host_a, workspace="/projects/other")
+    conversation_store.create_conversation(host_id=host_b, workspace="/projects/demo")
+
+    page = conversation_store.list_conversations(
+        host_id=host_a,
+        workspace="/projects/demo",
+    )
+
+    assert [conversation.id for conversation in page.data] == [exact.id]
+
+
 def test_create_conversation_with_git_branch(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

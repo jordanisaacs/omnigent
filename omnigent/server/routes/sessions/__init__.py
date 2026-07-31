@@ -140,6 +140,7 @@ from omnigent.server.bundles import bundle_location, validate_agent_bundle
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
 from omnigent.server.mcp_pool import ServerMcpPool
 from omnigent.server.permissions import check_session_access
+from omnigent.server.pm_integration import PmIntegrationService
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -794,6 +795,7 @@ def create_sessions_router(
     host_registry: HostRegistry | None = None,
     project_store: ProjectStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
+    pm_integration: PmIntegrationService | None = None,
 ) -> APIRouter:
     """
     Factory that builds the sessions router.
@@ -893,6 +895,7 @@ def create_sessions_router(
         host_registry=host_registry,
         project_store=project_store,
         background_title_coordinator=background_title_coordinator,
+        pm_integration=pm_integration,
     )
 
     register_hooks_routes(
@@ -956,6 +959,7 @@ def create_sessions_router(
         host_registry=host_registry,
         background_title_coordinator=background_title_coordinator,
         runner_tunnel_tokens=runner_tunnel_tokens,
+        pm_integration=pm_integration,
     )
 
     register_permissions_routes(

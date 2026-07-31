@@ -617,6 +617,8 @@ class ConversationStore(ABC):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        host_id: str | None = None,
+        workspace: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -727,6 +729,8 @@ class ConversationStore(ABC):
             Powers the ``(agent, title)`` child-session lookup in
             ``sys_session_send`` so the server can resolve the target
             in a single indexed query instead of fetching all children.
+        :param host_id: Exact host-id filter. ``None`` disables it.
+        :param workspace: Exact canonical workspace filter. ``None`` disables it.
         :returns: A :class:`PagedList` of :class:`Conversation`
             objects.
         """
@@ -1436,6 +1440,8 @@ class ConversationStore(ABC):
         terminal_launch_args: list[str] | None = None,
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
+        host_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> CreatedSession:
         """
         Atomically create a session and its session-scoped agent.
@@ -1475,6 +1481,8 @@ class ConversationStore(ABC):
         :param runner_id: Optional runner binding to persist at
             creation time, e.g. ``"runner_abc123"``. Child sessions
             inherit the parent's binding through this field.
+        :param host_id: Optional host binding for an integration-managed session.
+        :param conversation_id: Optional pre-generated durable session id.
         :returns: The committed conversation and agent entities.
         :raises ConversationNotFoundError: If
             ``parent_conversation_id`` is set but no such
@@ -1488,6 +1496,7 @@ class ConversationStore(ABC):
         self,
         source_conversation_id: str,
         *,
+        conversation_id: str | None = None,
         title: str | None = None,
         agent_id: str | None = None,
         cloned_agent_name: str | None = None,
@@ -1500,6 +1509,9 @@ class ConversationStore(ABC):
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
         project_id: str | None = None,
+        host_id: str | None = None,
+        workspace: str | None = None,
+        directories: tuple[SessionDirectory, ...] = (),
     ) -> Conversation:
         """
         Deep-copy a conversation and its items into a new conversation.
@@ -1579,6 +1591,10 @@ class ConversationStore(ABC):
             unfiled. The caller resolves whether the fork keeps the
             source's project — projects are owner-private, so the route
             passes the source's id only when the forker owns it.
+        :param conversation_id: Optional pre-generated durable fork id.
+        :param host_id: Optional host binding for integration-managed forks.
+        :param workspace: Optional canonical working directory for the fork.
+        :param directories: Stable roots for an integration-managed fork.
         :returns: The newly created :class:`Conversation`.
         :raises LookupError: If no conversation with
             *source_conversation_id* exists.
@@ -1617,8 +1633,6 @@ class ConversationStore(ABC):
         is atomic: any failure rolls back and the session stays on its
         current agent.
 
-        :param conversation_id: Session to switch, e.g.
-            ``"conv_abc123"``.
         :param new_agent_id: Pre-generated id for the new
             session-scoped agent, e.g. ``"ag_def456"``.
         :param new_agent_name: Name for the new agent row, e.g.

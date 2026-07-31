@@ -264,6 +264,7 @@ from omnigent.server.schemas import (
 )
 from omnigent.session_directories import (
     DEFAULT_DIRECTORY_ID,
+    SessionDirectory,
     build_session_directories,
     select_session_directories,
 )
@@ -8284,6 +8285,10 @@ def _persist_stored_session_bundle(
     agent_bundle_location: str,
     agent_description: str | None,
     runner_id: str | None = None,
+    conversation_id: str | None = None,
+    host_id: str | None = None,
+    workspace_override: str | None = None,
+    directories_override: tuple[SessionDirectory, ...] | None = None,
 ) -> CreatedSessionResponse:
     """
     Persist database rows for a bundle already written to artifacts.
@@ -8307,7 +8312,10 @@ def _persist_stored_session_bundle(
         any non-integrity reason.
     """
     try:
-        if metadata.parent_session_id is not None:
+        if directories_override is not None:
+            workspace = workspace_override
+            directories = directories_override
+        elif metadata.parent_session_id is not None:
             parent = conversation_store.get_conversation(metadata.parent_session_id)
             if parent is None:
                 raise ConversationNotFoundError(
@@ -8341,6 +8349,8 @@ def _persist_stored_session_bundle(
             terminal_launch_args=metadata.terminal_launch_args,
             parent_conversation_id=metadata.parent_session_id,
             runner_id=runner_id,
+            host_id=host_id,
+            conversation_id=conversation_id,
         )
     except ConversationNotFoundError as exc:
         # Parent was authorized by the caller but vanished (deleted)

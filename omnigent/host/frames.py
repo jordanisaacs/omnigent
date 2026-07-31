@@ -73,6 +73,8 @@ class HostFrameKind(str, Enum):
     FS_RESULT = "host.fs_result"
     MODEL_OPTIONS = "host.model_options"
     MODEL_OPTIONS_RESULT = "host.model_options_result"
+    INTEGRATION_REQUEST = "host.integration_request"
+    INTEGRATION_RESULT = "host.integration_result"
 
 
 # ── Frame dataclasses ────────────────────────────────────
@@ -104,6 +106,8 @@ class HostHelloFrame:
         ``omnigent.gateway_inference``). A family that could not be evaluated
         is omitted. ``None`` means unknown (an older host that doesn't report
         it) — never treat it as "nothing is gateway-backed".
+    :param integrations: Advertised host integration capabilities keyed by
+        integration name, e.g. ``{"pm": {"version": 1}}``.
     """
 
     version: str
@@ -114,6 +118,7 @@ class HostHelloFrame:
     gateway_inference: dict[str, bool] | None = None
     telemetry_opt_out: bool = False
     installation_id: str | None = None
+    integrations: dict[str, _JsonObject] = field(default_factory=dict)
 
 
 @dataclass
@@ -849,6 +854,26 @@ class HostModelOptionsResultFrame:
     routable_models: list[str] = field(default_factory=list)
 
 
+@dataclass
+class HostIntegrationRequestFrame:
+    """Server → host: run one allowlisted third-party integration operation."""
+
+    request_id: str
+    integration: str
+    operation: str
+    arguments: _JsonObject = field(default_factory=dict)
+
+
+@dataclass
+class HostIntegrationResultFrame:
+    """Host → server: result of an allowlisted integration operation."""
+
+    request_id: str
+    status: str
+    payload: object = None
+    error: str | None = None
+
+
 HostFrame = (
     HostHelloFrame
     | HostHarnessReadinessFrame
@@ -881,6 +906,8 @@ HostFrame = (
     | HostFsResultFrame
     | HostModelOptionsFrame
     | HostModelOptionsResultFrame
+    | HostIntegrationRequestFrame
+    | HostIntegrationResultFrame
 )
 
 
@@ -932,6 +959,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "gateway_inference": frame.gateway_inference,
                 "telemetry_opt_out": frame.telemetry_opt_out,
                 "installation_id": frame.installation_id,
+                "integrations": frame.integrations,
             }
         )
     if isinstance(frame, HostHarnessReadinessFrame):
@@ -1233,6 +1261,26 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "routable_models": frame.routable_models,
             }
         )
+    if isinstance(frame, HostIntegrationRequestFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.INTEGRATION_REQUEST.value,
+                "request_id": frame.request_id,
+                "integration": frame.integration,
+                "operation": frame.operation,
+                "arguments": frame.arguments,
+            }
+        )
+    if isinstance(frame, HostIntegrationResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.INTEGRATION_RESULT.value,
+                "request_id": frame.request_id,
+                "status": frame.status,
+                "payload": frame.payload,
+                "error": frame.error,
+            }
+        )
     raise TypeError(f"unknown host frame type: {type(frame).__name__}")
 
 
@@ -1355,6 +1403,10 @@ def _decode_known_host_frame(
             return _decode_model_options(msg)
         case HostFrameKind.MODEL_OPTIONS_RESULT:
             return _decode_model_options_result(msg)
+        case HostFrameKind.INTEGRATION_REQUEST:
+            return _decode_integration_request(msg)
+        case HostFrameKind.INTEGRATION_RESULT:
+            return _decode_integration_result(msg)
     raise ValueError(f"unhandled host frame kind: {kind.value!r}")  # pragma: no cover
 
 
@@ -1373,6 +1425,7 @@ def _decode_host_hello(msg: _JsonObject) -> HostHelloFrame:
         gateway_inference=optional_str_bool_map(msg, "gateway_inference"),
         telemetry_opt_out=bool(msg.get("telemetry_opt_out", False)),
         installation_id=_optional_nullable_str(msg, "installation_id"),
+        integrations=_optional_object_map(msg, "integrations"),
     )
 
 
@@ -1873,6 +1926,29 @@ def _decode_model_options_result(msg: _JsonObject) -> HostModelOptionsResultFram
     )
 
 
+def _decode_integration_request(msg: _JsonObject) -> HostIntegrationRequestFrame:
+    """Decode a generic, allowlisted host integration request."""
+    arguments = msg.get("arguments", {})
+    if not isinstance(arguments, dict):
+        raise ValueError("frame field must be a JSON object: 'arguments'")
+    return HostIntegrationRequestFrame(
+        request_id=_required_str(msg, "request_id"),
+        integration=_required_str(msg, "integration"),
+        operation=_required_str(msg, "operation"),
+        arguments=arguments,
+    )
+
+
+def _decode_integration_result(msg: _JsonObject) -> HostIntegrationResultFrame:
+    """Decode a generic host integration result."""
+    return HostIntegrationResultFrame(
+        request_id=_required_str(msg, "request_id"),
+        status=_required_str(msg, "status"),
+        payload=msg.get("payload"),
+        error=_optional_nullable_str(msg, "error"),
+    )
+
+
 # ── Field validators ─────────────────────────────────────
 
 
@@ -1974,6 +2050,22 @@ def optional_str_bool_map(msg: _JsonObject, key: str) -> dict[str, bool] | None:
     if not isinstance(val, dict):
         return None
     return {k: v for k, v in val.items() if isinstance(k, str) and isinstance(v, bool)}
+
+
+def _optional_object_map(msg: _JsonObject, key: str) -> dict[str, _JsonObject]:
+    """Return a tolerant string-to-object capability mapping."""
+    val = msg.get(key)
+    if not isinstance(val, dict):
+        return {}
+    return {
+        name: {
+            capability_key: capability_value
+            for capability_key, capability_value in capability.items()
+            if isinstance(capability_key, str)
+        }
+        for name, capability in val.items()
+        if isinstance(name, str) and isinstance(capability, dict)
+    }
 
 
 def _optional_nullable_str(msg: _JsonObject, key: str) -> str | None:

@@ -925,6 +925,9 @@ def create_app(
         RunnerBackgroundTitleGenerator(runner_router),
     )
     host_registry = HostRegistry()
+    from omnigent.server.pm_integration import PmIntegrationService
+
+    pm_integration = PmIntegrationService(host_registry, conversation_store)
     # Shared between the host tunnel (which records ``host.runner_exited``
     # reports from daemons) and the runner status endpoint (which surfaces
     # them to clients waiting for a launched runner to connect).
@@ -1992,6 +1995,7 @@ def create_app(
             # files a session into a project (owner-private membership).
             project_store=project_store,
             background_title_coordinator=background_title_coordinator,
+            pm_integration=pm_integration,
         ),
         prefix="/v1",
         tags=["sessions"],
@@ -2451,6 +2455,14 @@ def create_app(
     if host_store is not None:
         from omnigent.server.routes.host_tunnel import create_host_tunnel_router
         from omnigent.server.routes.hosts import create_hosts_router
+        from omnigent.server.routes.pm_integration import create_pm_integration_router
+
+        async def _on_host_connect(host_id: str, owner: str | None) -> None:
+            announce_hosts_changed(owner)
+            try:
+                await pm_integration.reconcile_host(host_id, owner)
+            except Exception:
+                _logger.exception("PM lease reconciliation failed for host %s", host_id)
 
         async def _on_hosts_changed(_host_id: str, owner: str | None) -> None:
             announce_hosts_changed(owner)
@@ -2462,7 +2474,7 @@ def create_app(
                 auth_provider=auth_provider,
                 runner_exit_reports=runner_exit_reports,
                 on_runner_exited=_on_runner_exited,
-                on_host_connect=_on_hosts_changed,
+                on_host_connect=_on_host_connect,
                 on_host_disconnect=_on_hosts_changed,
                 on_host_update=_on_hosts_changed,
             ),
@@ -2481,6 +2493,14 @@ def create_app(
             ),
             prefix="/v1",
             tags=["hosts"],
+        )
+        app.include_router(
+            create_pm_integration_router(
+                pm_integration,
+                auth_provider=auth_provider,
+            ),
+            prefix="/v1",
+            tags=["integrations"],
         )
 
     # Mount the auth router that matches the active provider. OIDC and
